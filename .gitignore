@@ -31,9 +31,15 @@ Thumbs.db
 dev-notes/
 samples/
 
-# Local configuration overrides
+# Actual runtime config/state (your real device inventory) -- config.example.json
+# is the tracked template; these are generated and stay local/on-device
+config.json
+discovered_devices.json
 config.local.json
 *.local.json
+
+# Runtime logs from a deployed instance
+logs/
 
 # Test outputs
 test_output/
