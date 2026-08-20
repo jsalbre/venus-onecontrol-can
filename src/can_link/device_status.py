@@ -35,7 +35,7 @@ class OutputState(IntEnum):
 @dataclass(frozen=True)
 class TankSensorStatus:
     fill_level_pct: int
-    battery_level_pct: int
+    battery_level_pct: int | None
     measurement_quality_pct: int | None
     x_acceleration_g: float | None
     y_acceleration_g: float | None
@@ -72,12 +72,13 @@ def _signed_byte(value: int) -> int:
 def decode_tank_sensor(payload: bytes) -> TankSensorStatus:
     if len(payload) != 8:
         raise ValueError(f"tank sensor status payload must be 8 bytes, got {len(payload)}")
+    battery = payload[1]
     quality = payload[2]
     x_raw = _signed_byte(payload[3])
     y_raw = _signed_byte(payload[4])
     return TankSensorStatus(
         fill_level_pct=payload[0] & 0x7F,
-        battery_level_pct=payload[1],
+        battery_level_pct=None if battery == NOT_SUPPORTED_BYTE else battery,
         measurement_quality_pct=None if quality == NOT_SUPPORTED_BYTE else quality,
         x_acceleration_g=None if x_raw == UNKNOWN_ACCELERATION_BYTE else x_raw / 1024.0,
         y_acceleration_g=None if y_raw == UNKNOWN_ACCELERATION_BYTE else y_raw / 1024.0,

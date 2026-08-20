@@ -39,6 +39,15 @@ class TankSensorTests(unittest.TestCase):
         status = decode_tank_sensor(payload)
         self.assertIsNone(status.measurement_quality_pct)
 
+    def test_battery_not_supported_sentinel(self):
+        # Confirmed against real hardware: all 8 tank sensors on this coach's
+        # 2026-08-19 capture report battery_level_pct=0xFF uniformly,
+        # including ones with plausible non-zero fill_level_pct readings --
+        # these are wired sensors with no battery to report, not a real 255%.
+        payload = bytes([42, 0xFF, 0, 0, 0, 0, 0, 0])
+        status = decode_tank_sensor(payload)
+        self.assertIsNone(status.battery_level_pct)
+
     def test_unknown_acceleration_sentinel(self):
         payload = bytes([0, 0, 0, 0x80, 0x80, 0, 0, 0])  # -128 = unknown
         status = decode_tank_sensor(payload)
