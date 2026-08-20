@@ -4,13 +4,51 @@
   "address_expiry_sec": 8,
   "bus_outage_threshold_sec": 12,
   "stale_threshold_sec": 300,
+  "restart_min_delay_sec": 30,
+  "restart_max_delay_sec": 300,
   "log_level": "INFO",
   "devices": [
     {
-      "stable_key": "function_name=32,function_instance=1",
-      "friendly_name": "Kitchen Light",
+      "stable_key": "function_name=67,function_instance=0",
+      "friendly_name": "Fresh Water Tank",
       "expose": true,
-      "device_class": "relay_light"
+      "device_class": "tank"
+    },
+    {
+      "stable_key": "function_name=68,function_instance=1",
+      "friendly_name": "Grey Water Tank 1",
+      "expose": true,
+      "device_class": "tank"
+    },
+    {
+      "stable_key": "function_name=68,function_instance=2",
+      "friendly_name": "Grey Water Tank 2",
+      "expose": true,
+      "device_class": "tank"
+    },
+    {
+      "stable_key": "function_name=69,function_instance=0",
+      "friendly_name": "Black Water Tank",
+      "expose": true,
+      "device_class": "tank"
+    },
+    {
+      "stable_key": "function_name=5,function_instance=0",
+      "friendly_name": "Water Pump",
+      "expose": true,
+      "device_class": "relay_pump"
+    },
+    {
+      "stable_key": "function_name=49,function_instance=1",
+      "friendly_name": "Dimmable Light",
+      "expose": false,
+      "device_class": "dimmable_light"
+    },
+    {
+      "stable_key": "function_name=105,function_instance=1",
+      "friendly_name": "Awning",
+      "expose": false,
+      "device_class": "motor_status"
     }
   ]
 }

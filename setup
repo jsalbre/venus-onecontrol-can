@@ -1,0 +1,10 @@
+#!/bin/bash
+
+packageName="venus-onecontrol-can"
+source "/data/SetupHelper/HelperResources/IncludeHelpers"
+
+# No pip/opkg dependencies -- everything in src/ is Python stdlib only
+# (see dev-notes/VENUS_OS_CONSTRAINTS.md). Nothing to do on INSTALL/UNINSTALL
+# beyond the standard file/service handling below.
+
+endScript 'INSTALL_FILES' 'INSTALL_SERVICES'

@@ -69,6 +69,9 @@ class SocketCanBus:
     def recv(self) -> CanFrame:
         return unpack_frame(self._socket.recv(FRAME_SIZE))
 
+    def fileno(self) -> int:
+        return self._socket.fileno()
+
     def __enter__(self) -> "SocketCanBus":
         return self
 

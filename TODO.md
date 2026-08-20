@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 1.1 | **Updated:** 2026-08-19
+**Version:** 1.2 | **Updated:** 2026-08-19
 
 ---
 
@@ -21,10 +21,17 @@
 - [ ] PID battery voltage read — deferred, low priority (nice to have, not needed). None seen in the 48s 2026-08-19 capture (no request code 0x11 traffic at all), but that's not proof nothing on the coach ever polls it — some node could do so at a longer interval than this window covered. No active probe tool planned; will opportunistically check any future longer/natural capture for it instead.
 - [x] ~~Investigate CIRCUIT_ID traffic~~ — checked and corrected. Earlier note overstated this: all 1525 CIRCUIT_ID frames in the capture (from all 31 devices) have payload `00000000` with zero variation. It's genuinely all-zero/unused, exactly as the source research describes — it's just broadcast by every node on this coach (~1Hz, alongside DEVICE_ID/DEVICE_STATUS) rather than by only a few. No further investigation needed.
 
-## Phase 2 — D-Bus Publish, Read-Only (blocked on Phase 1)
+## Phase 2 — D-Bus Publish, Read-Only (code implemented 2026-08-19, not yet run on hardware)
 
-- Deploy `dbus_bridge/` to the Cerbo via the SetupHelper `setup` script.
-- Publish tanks/battery/motor-status/lights-relays-pump-water-heater as read-only D-Bus services.
+- [x] `dbus_bridge/config_manager.py` -- the exposure safety gate (`is_exposed()`), device add/remove/rename, `DiscoveryLog` for unconfigured-device review. Unit tested.
+- [x] `dbus_bridge/device_mapping.py` -- device_class <-> DeviceType/service-kind/OutputType/OutputFunction/FluidType mapping, `stable_id_for()` (stable across restarts, unlike builtin `hash()`). Unit tested.
+- [x] `dbus_bridge/routing.py` -- pure decision logic (the two-layer safety gate: config-exposed + device-class-matches-live-broadcast) extracted so it's testable despite `publisher.py` requiring dbus/gi. Unit tested, including the specific "motor configured as a light" rejection case.
+- [x] `dbus_bridge/backoff.py`, `tank_service.py`, `switch_service.py` (Shelly-pattern `com.victronenergy.switch`, read-only in Phase 2), `motor_status_service.py` (custom, no writable state), `publisher.py` (orchestrator).
+- [x] SetupHelper packaging: `setup` script, `services/onecontrol-can/run`, `GUI_V1_NOT_REQUIRED`, `version`.
+- [ ] **Not yet done:** actually deploy to the Cerbo and confirm services register, values update live, and stale/disconnected behavior works. This is the next concrete action.
+- [ ] Battery voltage service is not implemented in Phase 2 (deferred, matches the low-priority PID item above -- Phase 2 makes no bus transmissions at all, including reads).
+
+## Phase 3 — Safe Commands (blocked on Phase 2)
 
 ## Phase 3 — Safe Commands (blocked on Phase 2)
 

@@ -1,6 +1,6 @@
 # Architecture
 
-**Version:** 1.1 | **Updated:** 2026-08-19
+**Version:** 1.2 | **Updated:** 2026-08-19
 
 ---
 
@@ -38,6 +38,24 @@ Relay commands (lights-via-relay, pump, water heater) carry their command in the
 
 `can_link/` (frame encode/decode, device decoders, session/command logic, address table) has no `socket` or `dbus` imports. It is pure `bytes in / structured data out`, so it can be unit tested and validated against captured CAN logs entirely offline, without a live bus or Venus OS — important given how slow on-device iteration is, and how safety-relevant the command encoding is.
 
+### Config-Gated D-Bus Exposure (Phase 2)
+
+A device present on the bus is never enough, by itself, to get a D-Bus service. Exposure requires an explicit `devices[]` entry in config with `expose: true` — this is checked by `ConfigManager.is_exposed()`, the single source of truth for whether a device is allowed to be published at all. Devices seen on the bus but not configured (or configured with `expose: false`) are recorded to a discovery log (`discovered_devices.json`, mirrors `discovered_sensors.json` from the govee-ble-venus-py reference project) purely for the user's review — being in that file never causes exposure.
+
+A second, independent check runs alongside the first: `device_mapping.validate_device_class()` cross-checks the config's declared `device_class` (e.g. `"relay_light"`) against the DeviceType the device is *actually* broadcasting right now. A config entry that's stale, copy-pasted from another device, or simply wrong is refused rather than trusted — this is the same "config declaration + live cross-check" pattern already established for the command safety gate in `address_table.py`, applied here to service creation. Both checks are pulled into `dbus_bridge/routing.py`, a pure module with no `dbus`/`gi` imports, specifically so this decision logic — unlike the rest of `dbus_bridge/` — can be unit tested without D-Bus.
+
+### Switch Service Follows the Real Shelly Driver Pattern
+
+Lights, the water pump, and the water heater are published via Venus OS's native `com.victronenergy.switch` service using the exact `/SwitchableOutput/<n>/...` path structure used by Victron's own `dbus-shelly` driver (State, Status, Name, Settings/Type, Settings/Function, Settings/ValidTypes, Settings/ValidFunctions, Settings/CustomName) — confirmed by reading that driver's source rather than assuming. This was chosen over inventing a custom read-only service type after checking that `/State` being registered `writeable=False` isn't how any real Victron driver actually represents a not-yet-controllable output; Shelly always registers it writeable.
+
+Phase 2 keeps `/State` writeable (so it renders as a normal switch in the Cerbo GUI, matching user expectation from Shelly integrations) but its `onchangecallback` unconditionally rejects the write and logs why — there is no command path wired up yet. Phase 3 replaces that rejecting callback with a real one. `Settings/Type` and `Settings/Function` are `writeable=False` even though Shelly's driver makes them writable, because a Shelly's physical output type is actually reconfigurable firmware-side; a OneControl device's type is fixed by its own hardware regardless of what the Cerbo GUI is told, so letting a user "change" it here would be a no-op that looks like it did something.
+
+Motor status is deliberately never exposed this way — see `motor_status_service.py`, which uses a plain non-standard service name and has no writable state path of any kind (not even a rejected one), so it can never be mistaken for something controllable.
+
+### Stable D-Bus Identifiers Across Restarts
+
+Service name suffixes and device instance numbers are derived from a stable key via `zlib.crc32`, not Python's builtin `hash()`. `hash()` on strings is randomized per process (`PYTHONHASHSEED`) as a security feature — using it here would silently assign a new D-Bus service name (and therefore lose any GUI customization tied to it, like renamed/repositioned devices) on every service restart. Caught during Phase 2 implementation before it shipped; regression-tested in `tests/test_device_mapping.py` by actually spawning subprocesses with `PYTHONHASHSEED=random` and confirming the id doesn't change.
+
 ---
 
 ## Protocol Reference
@@ -53,6 +71,7 @@ See `dev-notes/ARCHITECTURE.md` (private) for the full byte-level protocol refer
 
 ## Known Limitations
 
+- Battery voltage is not published in Phase 2 — it's PID-based (request/response), not broadcast, and Phase 2 is passive-only (no bus transmission at all yet, not even a read request). Deferred, low priority per the user's own steer.
 - PID battery voltage reads have not been validated against this coach's real traffic yet (deferred, low priority — no PID traffic appeared in the first capture at all). Everything else in v1's decode scope (DEVICE_ID structure, relay/motor status, dimmable light status, tank sensor status, the TEA session handshake) is now confirmed against a real 2026-08-19 capture from this coach — see dev-notes/ARCHITECTURE.md for specifics.
 - The stable-key fallback (PRODUCT_ID, instance) is not always unique in practice: on this coach, 13 of 31 discovered devices report `FUNCTION_NAME=0` and also share an identical `(PRODUCT_ID, instance)`, so they cannot currently be distinguished from each other by any broadcast data. These appear to be inputs never individually configured via the Lippert touchscreen (which this installation doesn't have) — see the "Future Phase — System Configuration via CAN" item in TODO.md. Devices with a real assigned FUNCTION_NAME (tanks, water pump, awning, slide, etc.) are unaffected.
 - Generator, HVAC, and leveler status decoding are not implemented in v1 (undocumented byte layouts in the source research).
