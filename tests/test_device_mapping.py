@@ -6,9 +6,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from can_link.types import DeviceType, StableKey
 from dbus_bridge.device_mapping import (
+    INSTANCE_BASE,
+    INSTANCE_RANGE,
     OutputFunction,
     OutputType,
+    assign_device_instance,
+    build_addable_list,
     fluid_type_for,
+    infer_device_class,
     output_function_for,
     output_type_for,
     service_kind_for,
@@ -114,6 +119,81 @@ class FluidTypeForTests(unittest.TestCase):
         self.assertIsNone(fluid_type_for(StableKey("product_id", 232, 42)))
 
 
+class AssignDeviceInstanceTests(unittest.TestCase):
+    # Regression coverage for a real bug found on real hardware: two tank
+    # services (Grey Tank 2 and Fresh Tank) both got device_instance=86,
+    # because stable_id_for() alone is evenly distributed but not
+    # collision-free -- a collision occurred with as few as 4 devices.
+
+    def test_persisted_value_always_wins(self):
+        key = StableKey("function_name", 67, 0)
+        # Even with a colliding already_assigned map, a persisted value must
+        # be returned unchanged -- it must never move once assigned.
+        result = assign_device_instance("tank", key, already_assigned={"x": 12345}, persisted=99)
+        self.assertEqual(result, 99)
+
+    def test_no_collision_uses_natural_candidate(self):
+        key = StableKey("function_name", 67, 0)
+        expected = INSTANCE_BASE["tank"] + stable_id_for(key, modulo=INSTANCE_RANGE)
+        result = assign_device_instance("tank", key, already_assigned={}, persisted=None)
+        self.assertEqual(result, expected)
+
+    def test_collision_probes_forward_to_a_free_slot(self):
+        key = StableKey("function_name", 67, 0)
+        natural = INSTANCE_BASE["tank"] + stable_id_for(key, modulo=INSTANCE_RANGE)
+        # Simulate another device already occupying this key's natural slot.
+        already_assigned = {"other_device": natural}
+        result = assign_device_instance("tank", key, already_assigned, persisted=None)
+        self.assertNotEqual(result, natural)
+        self.assertNotIn(result, already_assigned.values())
+
+    def test_reproduces_the_real_world_collision_and_resolves_it(self):
+        # The exact two real stable keys that collided in production
+        # (Grey Tank 1 and Black Tank, both landing on instance=86).
+        grey_1 = StableKey("function_name", 68, 1)
+        black = StableKey("function_name", 69, 0)
+        self.assertEqual(
+            INSTANCE_BASE["tank"] + stable_id_for(grey_1, modulo=INSTANCE_RANGE),
+            INSTANCE_BASE["tank"] + stable_id_for(black, modulo=INSTANCE_RANGE),
+            "test fixture assumption broken: these two keys no longer collide naturally",
+        )
+        first = assign_device_instance("tank", grey_1, already_assigned={}, persisted=None)
+        second = assign_device_instance(
+            "tank", black, already_assigned={grey_1.to_config_string(): first}, persisted=None
+        )
+        self.assertNotEqual(first, second)
+
+    def test_wraps_around_the_range_to_find_a_gap(self):
+        key = StableKey("function_name", 1, 0)
+        base = INSTANCE_BASE["tank"]
+        natural = base + stable_id_for(key, modulo=INSTANCE_RANGE)
+        # Occupy every slot except one, forcing a wrap past the range end.
+        gap = base  # leave the very first slot free
+        used = {
+            f"filler_{i}": (base + i)
+            for i in range(INSTANCE_RANGE)
+            if (base + i) != gap
+        }
+        result = assign_device_instance("tank", key, used, persisted=None)
+        self.assertEqual(result, gap)
+
+    def test_raises_when_range_is_completely_full(self):
+        key = StableKey("function_name", 1, 0)
+        base = INSTANCE_BASE["tank"]
+        used = {f"filler_{i}": base + i for i in range(INSTANCE_RANGE)}
+        with self.assertRaises(RuntimeError):
+            assign_device_instance("tank", key, used, persisted=None)
+
+    def test_different_kinds_use_different_ranges(self):
+        key = StableKey("function_name", 5, 0)
+        tank_instance = assign_device_instance("tank", key, {}, None)
+        switch_instance = assign_device_instance("switch", key, {}, None)
+        self.assertGreaterEqual(tank_instance, INSTANCE_BASE["tank"])
+        self.assertLess(tank_instance, INSTANCE_BASE["tank"] + INSTANCE_RANGE)
+        self.assertGreaterEqual(switch_instance, INSTANCE_BASE["switch"])
+        self.assertLess(switch_instance, INSTANCE_BASE["switch"] + INSTANCE_RANGE)
+
+
 class StableIdForTests(unittest.TestCase):
     def test_deterministic_across_calls(self):
         # Critical: this must NOT use Python's builtin hash(), which is
@@ -148,6 +228,148 @@ class StableIdForTests(unittest.TestCase):
         a = stable_id_for(StableKey("function_name", 67, 0))
         b = stable_id_for(StableKey("function_name", 68, 0))
         self.assertNotEqual(a, b)
+
+
+class InferDeviceClassTests(unittest.TestCase):
+    def test_tank_sensor(self):
+        key = StableKey("function_name", 67, 0)
+        self.assertEqual(infer_device_class(key, "TANK_SENSOR"), "tank")
+
+    def test_dimmable_light(self):
+        key = StableKey("function_name", 38, 0)
+        self.assertEqual(infer_device_class(key, "DIMMABLE_LIGHT"), "dimmable_light")
+
+    def test_all_motor_types_map_to_motor_status(self):
+        key = StableKey("function_name", 105, 1)
+        for label in (
+            "LATCHING_H_BRIDGE",
+            "MOMENTARY_H_BRIDGE",
+            "LATCHING_H_BRIDGE_TYPE_2",
+            "MOMENTARY_H_BRIDGE_TYPE_2",
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(infer_device_class(key, label), "motor_status")
+
+    def test_water_pump_relay(self):
+        key = StableKey("function_name", 5, 0)  # Water Pump
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_pump")
+
+    def test_fuel_pump_relay(self):
+        key = StableKey("function_name", 191, 0)  # Fuel Pump
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_pump")
+
+    def test_gas_water_heater_relay(self):
+        key = StableKey("function_name", 3, 0)
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_water_heater")
+
+    def test_electric_water_heater_relay(self):
+        key = StableKey("function_name", 4, 0)
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_water_heater")
+
+    def test_tank_heater_relay_is_not_a_water_heater(self):
+        # "Tank Heater" (270) is a freeze-protection relay on a tank, not a
+        # domestic water heater -- must fall back to relay_light, not be
+        # confused with relay_water_heater.
+        key = StableKey("function_name", 270, 0)
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_light")
+
+    def test_generic_relay_defaults_to_relay_light(self):
+        key = StableKey("function_name", 122, 0)  # Scare Light
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_light")
+
+    def test_all_relay_device_types_are_inferable(self):
+        key = StableKey("function_name", 122, 0)
+        for label in ("LATCHING_RELAY", "MOMENTARY_RELAY", "LATCHING_RELAY_TYPE_2", "MOMENTARY_RELAY_TYPE_2"):
+            with self.subTest(label=label):
+                self.assertIsNotNone(infer_device_class(key, label))
+
+    def test_unrecognized_raw_label_returns_none(self):
+        key = StableKey("function_name", 353, 0)
+        self.assertIsNone(infer_device_class(key, "RAW_44"))
+
+    def test_device_type_unknown_returns_none(self):
+        key = StableKey("product_id", 232, 42)
+        self.assertIsNone(infer_device_class(key, "UNKNOWN"))
+
+    def test_unsupported_but_recognized_device_types_return_none(self):
+        key = StableKey("function_name", 95, 0)
+        for label in ("GENERATOR_GENIE", "CHASSIS_INFO", "BLUETOOTH_GATEWAY", "HOUR_METER"):
+            with self.subTest(label=label):
+                self.assertIsNone(infer_device_class(key, label))
+
+    def test_pump_function_name_only_applies_to_function_name_keys(self):
+        # A product_id-fallback key sharing the numeric value 5 by
+        # coincidence must not accidentally match the pump heuristic --
+        # the heuristic only applies to kind="function_name" keys.
+        key = StableKey("product_id", 5, 0)
+        self.assertEqual(infer_device_class(key, "LATCHING_RELAY_TYPE_2"), "relay_light")
+
+
+class BuildAddableListTests(unittest.TestCase):
+    def test_excludes_already_configured_devices(self):
+        discovered = {"function_name=67,function_instance=0": {"device_type": "TANK_SENSOR", "function_name": "Fresh Tank"}}
+        result = build_addable_list(discovered, already_configured={"function_name=67,function_instance=0"})
+        self.assertEqual(result, [])
+
+    def test_excludes_product_id_fallback_keys(self):
+        # These are the known-empty/unconfigured Unity module ports -- see
+        # ARCHITECTURE.md. Never offer them, even if DEVICE_TYPE is
+        # otherwise a supported one.
+        discovered = {"product_id=232,instance=42": {"device_type": "LATCHING_RELAY_TYPE_2", "function_name": "UNKNOWN"}}
+        result = build_addable_list(discovered, already_configured=set())
+        self.assertEqual(result, [])
+
+    def test_excludes_unsupported_device_types(self):
+        discovered = {"function_name=353,function_instance=0": {"device_type": "RAW_44", "function_name": "LoCAP Gateway"}}
+        result = build_addable_list(discovered, already_configured=set())
+        self.assertEqual(result, [])
+
+    def test_includes_a_valid_tank(self):
+        discovered = {"function_name=67,function_instance=0": {"device_type": "TANK_SENSOR", "function_name": "Fresh Tank"}}
+        result = build_addable_list(discovered, already_configured=set())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].device_class, "tank")
+        self.assertEqual(result[0].suggested_friendly_name, "Fresh Tank")
+
+    def test_appends_instance_number_when_nonzero(self):
+        # Matches Lippert's own app display convention (f"{name} {instance}").
+        discovered = {"function_name=105,function_instance=1": {"device_type": "MOMENTARY_H_BRIDGE_TYPE_2", "function_name": "Awning"}}
+        result = build_addable_list(discovered, already_configured=set())
+        self.assertEqual(result[0].suggested_friendly_name, "Awning 1")
+
+    def test_real_discovery_log_from_actual_hardware(self):
+        # Verbatim discovered_devices.json from the 2026-08-20 deployment.
+        discovered = {
+            "function_name=105,function_instance=1": {"device_type": "MOMENTARY_H_BRIDGE_TYPE_2", "function_name": "Awning"},
+            "function_name=105,function_instance=2": {"device_type": "MOMENTARY_H_BRIDGE_TYPE_2", "function_name": "Awning"},
+            "function_name=122,function_instance=0": {"device_type": "LATCHING_RELAY_TYPE_2", "function_name": "Scare Light"},
+            "function_name=270,function_instance=0": {"device_type": "LATCHING_RELAY_TYPE_2", "function_name": "Tank Heater"},
+            "function_name=293,function_instance=0": {"device_type": "LATCHING_RELAY_TYPE_2", "function_name": "Underbody Accent Light"},
+            "function_name=34,function_instance=0": {"device_type": "DIMMABLE_LIGHT", "function_name": "Kitchen Pendants Light"},
+            "function_name=353,function_instance=0": {"device_type": "RAW_44", "function_name": "LoCAP Gateway"},
+            "function_name=38,function_instance=0": {"device_type": "DIMMABLE_LIGHT", "function_name": "Kitchen Island Light"},
+            "function_name=49,function_instance=1": {"device_type": "DIMMABLE_LIGHT", "function_name": "Awning Light"},
+            "function_name=49,function_instance=2": {"device_type": "DIMMABLE_LIGHT", "function_name": "Awning Light"},
+            "function_name=96,function_instance=1": {"device_type": "MOMENTARY_H_BRIDGE_TYPE_2", "function_name": "Slide"},
+            "function_name=96,function_instance=2": {"device_type": "MOMENTARY_H_BRIDGE_TYPE_2", "function_name": "Slide"},
+            "product_id=184,instance=1": {"device_type": "BLUETOOTH_GATEWAY", "function_name": "UNKNOWN"},
+            "product_id=185,instance=249": {"device_type": "RAW_43", "function_name": "UNKNOWN"},
+            "product_id=232,instance=42": {"device_type": "LATCHING_RELAY_TYPE_2", "function_name": "UNKNOWN"},
+        }
+        result = build_addable_list(discovered, already_configured=set())
+        by_key = {d.stable_key.to_config_string(): d for d in result}
+
+        # 4 excluded (3 product_id-fallback + 1 unsupported RAW type), 11 remain.
+        self.assertEqual(len(result), 11)
+        self.assertNotIn("product_id=184,instance=1", by_key)
+        self.assertNotIn("product_id=185,instance=249", by_key)
+        self.assertNotIn("product_id=232,instance=42", by_key)
+        self.assertNotIn("function_name=353,function_instance=0", by_key)
+
+        self.assertEqual(by_key["function_name=105,function_instance=1"].device_class, "motor_status")
+        self.assertEqual(by_key["function_name=105,function_instance=1"].suggested_friendly_name, "Awning 1")
+        self.assertEqual(by_key["function_name=270,function_instance=0"].device_class, "relay_light")
+        self.assertEqual(by_key["function_name=38,function_instance=0"].device_class, "dimmable_light")
 
 
 if __name__ == "__main__":

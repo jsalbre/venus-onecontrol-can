@@ -28,8 +28,29 @@ class StableKeyTests(unittest.TestCase):
 
 
 class FunctionNameLabelTests(unittest.TestCase):
+    # Real vendor strings, extracted from the LippertConnect app's own
+    # FUNCTION_NAME lookup table -- see dev-notes/ARCHITECTURE.md. Spot
+    # checks match what the user's phone app actually displays.
     def test_known_value_returns_label(self):
-        self.assertEqual(function_name_label(67), "FRESH_TANK")
+        self.assertEqual(function_name_label(67), "Fresh Tank")
+
+    def test_zero_is_a_real_table_entry_not_the_fallback(self):
+        self.assertEqual(function_name_label(0), "UNKNOWN")
+
+    def test_kitchen_island_light(self):
+        self.assertEqual(function_name_label(38), "Kitchen Island Light")
+
+    def test_awning(self):
+        self.assertEqual(function_name_label(105), "Awning")
+
+    def test_scare_light(self):
+        self.assertEqual(function_name_label(122), "Scare Light")
+
+    def test_two_distinct_codes_share_the_leveler_name(self):
+        # Not a transcription error -- the vendor table genuinely has two
+        # different FUNCTION_NAME codes both named "Leveler".
+        self.assertEqual(function_name_label(109), "Leveler")
+        self.assertEqual(function_name_label(142), "Leveler")
 
     def test_unknown_value_returns_placeholder(self):
         self.assertEqual(function_name_label(9999), "UNKNOWN_9999")

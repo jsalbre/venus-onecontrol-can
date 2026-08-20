@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from can_link.types import StableKey
+from dbus_bridge.device_mapping import service_kind_for
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -123,6 +124,42 @@ class ConfigManager:
     def get_friendly_name(self, stable_key: StableKey) -> str | None:
         device = self.find_device(stable_key)
         return device.get("friendly_name") if device else None
+
+    def get_device_instance(self, stable_key: StableKey) -> int | None:
+        device = self.find_device(stable_key)
+        return device.get("device_instance") if device else None
+
+    def set_device_instance(self, stable_key: StableKey, instance: int) -> None:
+        """Persists a device's assigned D-Bus instance number. Must only be
+        called once per device -- an instance should never change after
+        assignment (Venus OS ties GUI customization to it). See
+        device_mapping.assign_device_instance()."""
+        target = stable_key.to_config_string()
+        with self._lock():
+            config = self._read_unlocked()
+            devices = config.get("devices", [])
+            for device in devices:
+                if device.get("stable_key") == target:
+                    device["device_instance"] = instance
+                    config["devices"] = devices
+                    self._atomic_write(config)
+                    return
+            raise KeyError(f"stable_key not found in config: {target}")
+
+    def get_instances_by_kind(self, kind: str) -> dict[str, int]:
+        """Every already-persisted device_instance among configured devices
+        whose device_class maps to `kind`, keyed by stable_key config
+        string. Used to avoid assigning a colliding instance to a new
+        device of the same kind."""
+        result: dict[str, int] = {}
+        for device in self.get_devices():
+            device_class = device.get("device_class")
+            instance = device.get("device_instance")
+            if device_class is None or instance is None:
+                continue
+            if service_kind_for(device_class) == kind:
+                result[device["stable_key"]] = instance
+        return result
 
     def add_device(
         self,

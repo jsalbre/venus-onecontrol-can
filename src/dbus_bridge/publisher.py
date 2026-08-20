@@ -39,17 +39,13 @@ from can_link.frame import ExtendedId, StandardId, decode_id
 from can_link.types import MessageType, StableKey, function_name_label
 from dbus_bridge.backoff import RestartBackoff
 from dbus_bridge.config_manager import ConfigManager, DiscoveryLog
-from dbus_bridge.device_mapping import fluid_type_for, stable_id_for
+from dbus_bridge.device_mapping import assign_device_instance, fluid_type_for
 from dbus_bridge.motor_status_service import MotorStatusService
 from dbus_bridge.routing import DeviceIdAction, route_device_id, status_update_method_for
 from dbus_bridge.switch_service import SwitchService
 from dbus_bridge.tank_service import TankService
 
 _LOGGER = logging.getLogger(__name__)
-
-# Device instance ranges, offset by service kind so different kinds never collide.
-_INSTANCE_BASE = {"tank": 20, "switch": 700, "motor_status": 800}
-_INSTANCE_RANGE = 100
 
 
 @dataclass
@@ -162,7 +158,13 @@ class Publisher:
         import dbus
 
         friendly_name = self.config_manager.get_friendly_name(key) or "OneControl Device"
-        device_instance = _INSTANCE_BASE[kind] + stable_id_for(key, modulo=_INSTANCE_RANGE)
+
+        persisted = self.config_manager.get_device_instance(key)
+        already_assigned = self.config_manager.get_instances_by_kind(kind)
+        device_instance = assign_device_instance(kind, key, already_assigned, persisted)
+        if persisted is None:
+            self.config_manager.set_device_instance(key, device_instance)
+
         dbusconn = dbus.SystemBus(private=True)
 
         try:

@@ -13,9 +13,16 @@ misrepresents (or worse, mis-commands, in Phase 3) a device.
 from __future__ import annotations
 
 import zlib
+from dataclasses import dataclass
 from enum import IntEnum
 
-from can_link.types import COMMANDABLE_DEVICE_TYPES, MOTOR_DEVICE_TYPES, DeviceType, StableKey
+from can_link.types import (
+    COMMANDABLE_DEVICE_TYPES,
+    MOTOR_DEVICE_TYPES,
+    DeviceType,
+    StableKey,
+    function_name_label,
+)
 
 # Venus OS SwitchableOutput API enums (confirmed against victronenergy/dbus-shelly's
 # real driver -- these are the platform's own values, not Shelly-specific).
@@ -62,6 +69,12 @@ DEVICE_CLASS_SERVICE_KIND: dict[str, str] = {
     "dimmable_light": "switch",
     "motor_status": "motor_status",
 }
+
+# Device instance ranges, offset by service kind so different kinds never
+# collide. Each range must comfortably exceed the number of devices of that
+# kind ever expected on one coach -- see assign_device_instance().
+INSTANCE_BASE: dict[str, int] = {"tank": 20, "switch": 700, "motor_status": 800}
+INSTANCE_RANGE = 100
 
 # FUNCTION_NAME -> com.victronenergy.tank /FluidType value (per Venus OS's
 # documented FluidType enum: 0=Fuel,1=Fresh water,2=Waste water,3=Live well,
@@ -112,6 +125,41 @@ def stable_id_for(stable_key: StableKey, modulo: int = 10000) -> int:
     return zlib.crc32(stable_key.to_config_string().encode()) % modulo
 
 
+def assign_device_instance(
+    kind: str, key: StableKey, already_assigned: dict[str, int], persisted: int | None
+) -> int:
+    """Returns the device instance to use for `key`, guaranteed unique
+    against every instance in `already_assigned` (other devices of the same
+    kind, keyed by their stable_key config string).
+
+    If `persisted` is given (this key already has a saved instance), it's
+    returned unchanged -- an instance must never change once assigned, since
+    Venus OS ties GUI customization (position, name) to it. Otherwise a
+    starting candidate is derived deterministically from the stable key
+    (so instances stay reasonably stable across a fresh install even before
+    persistence kicks in), and linearly probed forward within the kind's
+    range until a free slot is found -- `stable_id_for()` alone is only
+    evenly distributed, not collision-free, and a real collision was
+    observed in practice with as few as 4 devices of one kind.
+
+    The caller is responsible for persisting the result (ConfigManager) the
+    first time this returns a freshly-assigned (non-persisted) instance.
+    """
+    if persisted is not None:
+        return persisted
+
+    base = INSTANCE_BASE[kind]
+    used = set(already_assigned.values())
+    candidate = base + stable_id_for(key, modulo=INSTANCE_RANGE)
+    for _ in range(INSTANCE_RANGE):
+        if candidate not in used:
+            return candidate
+        candidate += 1
+        if candidate >= base + INSTANCE_RANGE:
+            candidate = base
+    raise RuntimeError(f"no free device instance in kind={kind!r} range (all {INSTANCE_RANGE} slots used)")
+
+
 def fluid_type_for(stable_key: StableKey) -> int | None:
     """Derives the tank's Venus OS FluidType from its stable key's
     FUNCTION_NAME, when known. Returns None if not derivable (e.g. an
@@ -119,3 +167,80 @@ def fluid_type_for(stable_key: StableKey) -> int | None:
     if stable_key.kind == "function_name":
         return _FUNCTION_NAME_TO_FLUID_TYPE.get(stable_key.primary)
     return None
+
+
+# FUNCTION_NAME codes that sub-classify a relay-family DEVICE_TYPE as a
+# water heater or pump rather than the generic "relay_light" default.
+# Deliberately narrow: e.g. "Fresh Tank Heater"/"Tank Heater"/"Holding Tanks
+# Heater" are freeze-protection relays on a tank, not a domestic water
+# heater, so they're excluded and fall back to relay_light.
+_WATER_HEATER_FUNCTION_NAMES = frozenset({3, 4, 295, 296})  # Gas/Electric Water Heater, Water Heater(s)
+_PUMP_FUNCTION_NAMES = frozenset({5, 191})  # Water Pump, Fuel Pump
+
+
+def infer_device_class(stable_key: StableKey, device_type_label: str) -> str | None:
+    """Infers device_class from what the device itself already broadcasts
+    (DEVICE_TYPE + FUNCTION_NAME) -- no user input needed, since this is
+    fully determined by the bus, the same way a human reviewing the
+    discovery log would work it out. Returns None if DEVICE_TYPE is
+    unrecognized (device_type_label doesn't match a DeviceType member, e.g.
+    a raw/unmapped value) or isn't one of the six supported device classes
+    (e.g. GENERATOR_GENIE, CHASSIS_INFO, BLUETOOTH_GATEWAY have no service
+    type in this project)."""
+    try:
+        device_type = DeviceType[device_type_label]
+    except KeyError:
+        return None
+
+    if device_type == DeviceType.TANK_SENSOR:
+        return "tank"
+    if device_type == DeviceType.DIMMABLE_LIGHT:
+        return "dimmable_light"
+    if device_type in MOTOR_DEVICE_TYPES:
+        return "motor_status"
+    if device_type in _RELAY_DEVICE_TYPES:
+        if stable_key.kind == "function_name":
+            if stable_key.primary in _WATER_HEATER_FUNCTION_NAMES:
+                return "relay_water_heater"
+            if stable_key.primary in _PUMP_FUNCTION_NAMES:
+                return "relay_pump"
+        return "relay_light"
+    return None
+
+
+@dataclass(frozen=True)
+class AddableDevice:
+    stable_key: StableKey
+    device_class: str
+    suggested_friendly_name: str
+
+
+def build_addable_list(discovered: dict, already_configured: set) -> list[AddableDevice]:
+    """Filters discovered_devices.json entries down to ones that could
+    actually be added: not already configured, a supported device_class
+    (infer_device_class() succeeded), and NOT a product_id-fallback key.
+    product_id-fallback keys are excluded deliberately -- they're the
+    known-empty/unconfigured Unity module ports documented in
+    ARCHITECTURE.md, and multiple physical (non-)devices share the exact
+    same fallback identity, so there's no reliable device to enable there."""
+    result = []
+    for key_str, info in discovered.items():
+        if key_str in already_configured:
+            continue
+        try:
+            key = StableKey.from_config_string(key_str)
+        except ValueError:
+            continue
+        if key.kind != "function_name":
+            continue
+
+        device_class = infer_device_class(key, info.get("device_type", ""))
+        if device_class is None:
+            continue
+
+        name = function_name_label(key.primary)
+        if key.instance:
+            name = f"{name} {key.instance}"
+
+        result.append(AddableDevice(key, device_class, name))
+    return result

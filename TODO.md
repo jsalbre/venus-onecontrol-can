@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 1.2 | **Updated:** 2026-08-19
+**Version:** 1.4 | **Updated:** 2026-08-20
 
 ---
 
@@ -21,17 +21,19 @@
 - [ ] PID battery voltage read — deferred, low priority (nice to have, not needed). None seen in the 48s 2026-08-19 capture (no request code 0x11 traffic at all), but that's not proof nothing on the coach ever polls it — some node could do so at a longer interval than this window covered. No active probe tool planned; will opportunistically check any future longer/natural capture for it instead.
 - [x] ~~Investigate CIRCUIT_ID traffic~~ — checked and corrected. Earlier note overstated this: all 1525 CIRCUIT_ID frames in the capture (from all 31 devices) have payload `00000000` with zero variation. It's genuinely all-zero/unused, exactly as the source research describes — it's just broadcast by every node on this coach (~1Hz, alongside DEVICE_ID/DEVICE_STATUS) rather than by only a few. No further investigation needed.
 
-## Phase 2 — D-Bus Publish, Read-Only (code implemented 2026-08-19, not yet run on hardware)
+## Phase 2 — D-Bus Publish, Read-Only (done and confirmed on real hardware, 2026-08-20)
 
 - [x] `dbus_bridge/config_manager.py` -- the exposure safety gate (`is_exposed()`), device add/remove/rename, `DiscoveryLog` for unconfigured-device review. Unit tested.
 - [x] `dbus_bridge/device_mapping.py` -- device_class <-> DeviceType/service-kind/OutputType/OutputFunction/FluidType mapping, `stable_id_for()` (stable across restarts, unlike builtin `hash()`). Unit tested.
 - [x] `dbus_bridge/routing.py` -- pure decision logic (the two-layer safety gate: config-exposed + device-class-matches-live-broadcast) extracted so it's testable despite `publisher.py` requiring dbus/gi. Unit tested, including the specific "motor configured as a light" rejection case.
 - [x] `dbus_bridge/backoff.py`, `tank_service.py`, `switch_service.py` (Shelly-pattern `com.victronenergy.switch`, read-only in Phase 2), `motor_status_service.py` (custom, no writable state), `publisher.py` (orchestrator).
 - [x] SetupHelper packaging: `setup` script, `services/onecontrol-can/run`, `GUI_V1_NOT_REQUIRED`, `version`.
-- [ ] **Not yet done:** actually deploy to the Cerbo and confirm services register, values update live, and stale/disconnected behavior works. This is the next concrete action.
+- [x] Deployed to the Cerbo (venus.local). 4 tank services + water pump switch service registered on D-Bus; the Phase 2 write-rejection safety gate confirmed working live (a real write attempt to `/SwitchableOutput/0/State` was correctly rejected and logged). `discovered_devices.json` populated as expected.
+- [x] Found, fixed, and redeployed: a real device-instance collision (two tank services both got instance=86) -- see CHANGELOG.md and `ARCHITECTURE.md`'s "Stable D-Bus Identifiers" note. Confirmed on hardware: all four tank services now have distinct instances (76, 86, 58, 87).
+- [x] Visually confirmed in the Cerbo GUI: water pump switch-pane entry correctly reverts on a rejected write (doesn't show a stale "on"); physical OneControl panel toggles reflect in the Venus GUI immediately.
+- [x] `enable-device` CLI tool built, tested end-to-end locally, and confirmed working on the real Cerbo (2026-08-20): used to add Tank Heater, Kitchen Island Light, and Kitchen Pendants Light, all with correctly auto-inferred device_class (notably "Tank Heater" correctly landed on `relay_light`, not `relay_water_heater`) and zero device-instance collisions across 4 tank + 4 switch services.
+- [x] Fixed a deployment-process bug found in the process: an initial partial-file copy (just `enable-device` itself) broke with `ImportError: cannot import name 'build_addable_list'` since it depends on modules not yet synced. Fixed by always doing a full tarball sync + `setup install auto` (which handles the service restart itself, no manual `svc -d`/`svc -u` needed) -- documented in README.md and `dev-notes/VENUS_OS_CONSTRAINTS.md`.
 - [ ] Battery voltage service is not implemented in Phase 2 (deferred, matches the low-priority PID item above -- Phase 2 makes no bus transmissions at all, including reads).
-
-## Phase 3 — Safe Commands (blocked on Phase 2)
 
 ## Phase 3 — Safe Commands (blocked on Phase 2)
 
@@ -39,12 +41,17 @@
 - Test with a single low-consequence device before enabling the rest.
 - Run a real or simulated OneControl power-loss test to confirm the outage safety gate works.
 
+## Future — GitHub-Based Auto-Update (not started, deliberately deferred)
+
+- Once this project is ready to be public: push to a public GitHub repo, add `gitHubInfo` (`user:branch`), and PackageManager's own `GitHubDownload`/`updateGitHubVersion` can check `raw.githubusercontent.com/<user>/<repo>/<branch>/version` and pull `github.com/<user>/<repo>/archive/<branch>.tar.gz` automatically -- no special GitHub Release/tag needed, confirmed by reading `PackageManager.py` directly (2026-08-20). See `dev-notes/VENUS_OS_CONSTRAINTS.md` for the mechanics.
+- Until then: manual tarball sync + `setup install auto` (see README.md's Installation section) is the deployment path. Not a blocker for anything -- just slower than it'll eventually be.
+
 ## Future Phase — System Configuration via CAN (research only, not scoped yet)
 
-- Investigate whether OneControl input/device configuration (renaming an input, changing its purpose/function assignment, enabling additional unused inputs) can be done over CAN. Normally done via the Lippert touchscreen controller, which this installation doesn't have.
-- This is a distinct problem from reading/commanding existing devices (v1's scope): it likely means writing to whatever config/provisioning mechanism assigns a physical input's DEVICE_ID identity (FUNCTION_NAME, instance) rather than just sending DEVICE_STATUS commands. None of the research so far (esphome-onecontrol, UnityX-canbus, manos/OneControl-RV-C-Protocol) documents this — it would need new reverse-engineering, likely by capturing traffic while using the LippertConnect app or a touchscreen controller (borrowed/simulated) to change a setting and diffing the bus traffic.
-- **Confirmed real-world motivation (2026-08-19 capture):** 13 of the 31 devices discovered on this coach report `FUNCTION_NAME=0` (unconfigured) and, worse, ALSO share an identical fallback `(PRODUCT_ID=232, instance=42)` — meaning the stable-key discovery design (`ARCHITECTURE.md`) cannot currently distinguish these 13 devices from each other at all, by any broadcast data. They span tank sensors, relays, an H-bridge motor, the hour meter, chassis info, and the generator genie. This isn't a decoder bug — there's genuinely no unique identity being broadcast for an unconfigured input. Solving this future-phase item may be the only way to make those 13 devices usable.
-- Not started. No design decisions made. Revisit only when explicitly asked.
+- Investigate whether OneControl input/device configuration (renaming an input, changing its purpose/function assignment) can be done over CAN. Normally done via the Lippert touchscreen controller, which this installation doesn't have.
+- **Mechanism now identified (2026-08-20), not yet implemented or tested:** decompiling the LippertConnect app confirmed a device's `(FUNCTION_NAME, FunctionInstance)` is stored in two dedicated, per-device PIDs — `PID 4 = IDS_CAN_FUNCTION_NAME` (UINT16) and `PID 5 = IDS_CAN_FUNCTION_INSTANCE` (UINT8) — and the app's own rename feature works by PID-writing these two values (almost certainly via the same session/TEA-cipher write path already implemented for Phase 3 commands, though this hasn't been confirmed against a real PID_WRITE capture). This turns "investigate whether it's possible" into "implement and test a PID write to PID 4/5" — a much narrower, better-scoped task than originally framed, whenever it's wanted.
+- **On the FUNCTION_NAME=0 collision (13 of 31 devices in the 2026-08-19 capture sharing an identical fallback `(PRODUCT_ID=232, instance=42)` stable key):** per the user, these are understood to just be unused/unconfigured physical input connections on the Unity module itself (empty ports with nothing wired to them) — not mystery devices needing investigation. This isn't a gap to solve unless/until something new gets physically wired into one of those ports and needs a name assigned without the touchscreen, at which point the PID 4/5 write mechanism above is how that would be done.
+- Not started. No design decisions made beyond the above. Revisit only when explicitly asked.
 
 ## Not Planned (deliberate scope boundary)
 

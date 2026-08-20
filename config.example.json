@@ -10,25 +10,25 @@
   "devices": [
     {
       "stable_key": "function_name=67,function_instance=0",
-      "friendly_name": "Fresh Water Tank",
+      "friendly_name": "Fresh Tank",
       "expose": true,
       "device_class": "tank"
     },
     {
       "stable_key": "function_name=68,function_instance=1",
-      "friendly_name": "Grey Water Tank 1",
+      "friendly_name": "Grey Tank 1",
       "expose": true,
       "device_class": "tank"
     },
     {
       "stable_key": "function_name=68,function_instance=2",
-      "friendly_name": "Grey Water Tank 2",
+      "friendly_name": "Grey Tank 2",
       "expose": true,
       "device_class": "tank"
     },
     {
       "stable_key": "function_name=69,function_instance=0",
-      "friendly_name": "Black Water Tank",
+      "friendly_name": "Black Tank",
       "expose": true,
       "device_class": "tank"
     },
@@ -40,13 +40,13 @@
     },
     {
       "stable_key": "function_name=49,function_instance=1",
-      "friendly_name": "Dimmable Light",
+      "friendly_name": "Awning Light 1",
       "expose": false,
       "device_class": "dimmable_light"
     },
     {
       "stable_key": "function_name=105,function_instance=1",
-      "friendly_name": "Awning",
+      "friendly_name": "Awning 1",
       "expose": false,
       "device_class": "motor_status"
     }

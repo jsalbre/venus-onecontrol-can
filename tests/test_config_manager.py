@@ -88,6 +88,44 @@ class ConfigManagerTests(unittest.TestCase):
         self.manager.update_friendly_name(LIGHT_KEY, "Dining Room Light")
         self.assertEqual(self.manager.get_friendly_name(LIGHT_KEY), "Dining Room Light")
 
+    def test_device_instance_absent_by_default(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.assertIsNone(self.manager.get_device_instance(LIGHT_KEY))
+
+    def test_set_and_get_device_instance(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_device_instance(LIGHT_KEY, 742)
+        self.assertEqual(self.manager.get_device_instance(LIGHT_KEY), 742)
+
+    def test_device_instance_persists_across_manager_instances(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_device_instance(LIGHT_KEY, 742)
+        reloaded = ConfigManager(self.config_path)
+        self.assertEqual(reloaded.get_device_instance(LIGHT_KEY), 742)
+
+    def test_set_device_instance_on_unknown_device_raises(self):
+        with self.assertRaises(KeyError):
+            self.manager.set_device_instance(LIGHT_KEY, 742)
+
+    def test_get_instances_by_kind_filters_by_service_kind(self):
+        tank_key = StableKey("function_name", 67, 0)
+        self.manager.add_device(tank_key, "Fresh Tank", "tank", expose=True)
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_device_instance(tank_key, 21)
+        self.manager.set_device_instance(LIGHT_KEY, 701)
+
+        tank_instances = self.manager.get_instances_by_kind("tank")
+        self.assertEqual(tank_instances, {tank_key.to_config_string(): 21})
+
+        switch_instances = self.manager.get_instances_by_kind("switch")
+        self.assertEqual(switch_instances, {LIGHT_KEY.to_config_string(): 701})
+
+    def test_get_instances_by_kind_excludes_unassigned_devices(self):
+        # A device with no device_instance yet (never created a service)
+        # must not show up as "occupying" an instance.
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.assertEqual(self.manager.get_instances_by_kind("switch"), {})
+
 
 class DiscoveryLogTests(unittest.TestCase):
     def setUp(self):

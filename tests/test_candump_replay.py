@@ -33,13 +33,13 @@ class ParseLogLineTests(unittest.TestCase):
 class ReplayTests(unittest.TestCase):
     def test_decodes_device_id_then_device_status_for_tank_sensor(self):
         lines = [
-            "(0.000000) can1 242#1234010A00430100",  # DEVICE_ID: tank, FRESH_TANK, function_instance=1
+            "(0.000000) can1 242#1234010A00430100",  # DEVICE_ID: tank, FUNCTION_NAME=67 (Fresh Tank), function_instance=1
             "(1.000000) can1 342#2A5A500000000000",  # DEVICE_STATUS: fill=42%, battery=90, quality=80
         ]
         output = list(replay(lines))
         self.assertEqual(len(output), 2)
         self.assertIn("DEVICE_ID", output[0])
-        self.assertIn("FRESH_TANK", output[0])
+        self.assertIn("Fresh Tank", output[0])
         self.assertIn("stable_key=function_name=67,function_instance=1", output[0])
         self.assertIn("DEVICE_STATUS", output[1])
         self.assertIn("fill_level_pct=42", output[1])
