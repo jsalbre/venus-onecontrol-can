@@ -1,0 +1,16 @@
+{
+  "can_interface": "vecan1",
+  "pid_poll_interval_sec": 30,
+  "address_expiry_sec": 8,
+  "bus_outage_threshold_sec": 12,
+  "stale_threshold_sec": 300,
+  "log_level": "INFO",
+  "devices": [
+    {
+      "stable_key": "function_name=32,function_instance=1",
+      "friendly_name": "Kitchen Light",
+      "expose": true,
+      "device_class": "relay_light"
+    }
+  ]
+}
