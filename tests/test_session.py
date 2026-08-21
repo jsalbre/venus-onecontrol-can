@@ -5,6 +5,9 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from can_link.session import (
+    SESSION_CYPHERS,
+    SESSION_ID_DIAGNOSTIC,
+    SESSION_ID_REMOTE_CONTROL,
     SessionClient,
     SessionError,
     SessionState,
@@ -78,6 +81,42 @@ class SessionClientHappyPathTests(unittest.TestCase):
         end_payload = client.session_end(now=3.0)
         self.assertEqual(end_payload, bytes([0x00, 0x04]))
         self.assertEqual(client.state, SessionState.CLOSED)
+
+
+class GeneralizedSessionIdTests(unittest.TestCase):
+    """DIAGNOSTIC (SESSION_ID 2) support, added 2026-08-21 for PID writes
+    (see ARCHITECTURE.md's PID Reconfiguration design decision). Pure logic
+    tests only -- unlike TeaTransformRealHardwareTests above, there is no
+    real captured DIAGNOSTIC handshake to validate against; the DIAGNOSTIC
+    cypher constant is decompiled-only."""
+
+    def test_default_session_id_is_remote_control_and_unchanged(self):
+        # Regression: omitting session_id must still match every real
+        # REMOTE_CONTROL fixture exactly.
+        client = SessionClient()
+        self.assertEqual(client.session_id, SESSION_ID_REMOTE_CONTROL)
+        self.assertEqual(client.request_seed(now=0.0), bytes([0x00, 0x04]))
+
+    def test_diagnostic_session_id_payload_byte(self):
+        client = SessionClient(session_id=SESSION_ID_DIAGNOSTIC)
+        self.assertEqual(client.request_seed(now=0.0), bytes([0x00, 0x02]))
+
+    def test_diagnostic_handshake_uses_diagnostic_cypher(self):
+        client = SessionClient(session_id=SESSION_ID_DIAGNOSTIC)
+        client.request_seed(now=0.0)
+        seed = 0xDEADBEEF
+        seed_reply = bytes([0x00, 0x02]) + seed.to_bytes(4, "big")
+        key_payload = client.handle_seed_response(seed_reply, now=1.0)
+        expected_key = tea_transform(seed, SESSION_CYPHERS[SESSION_ID_DIAGNOSTIC])
+        self.assertEqual(int.from_bytes(key_payload[2:], "big"), expected_key)
+        # Must differ from what REMOTE_CONTROL's cypher would produce for
+        # the same seed -- otherwise the session_id parameter isn't doing
+        # anything.
+        self.assertNotEqual(expected_key, tea_transform(seed))
+
+    def test_tea_transform_default_matches_remote_control_cypher(self):
+        seed = 0x12345678
+        self.assertEqual(tea_transform(seed), tea_transform(seed, SESSION_CYPHERS[SESSION_ID_REMOTE_CONTROL]))
 
 
 class SessionClientErrorTests(unittest.TestCase):
