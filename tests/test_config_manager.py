@@ -88,6 +88,34 @@ class ConfigManagerTests(unittest.TestCase):
         self.manager.update_friendly_name(LIGHT_KEY, "Dining Room Light")
         self.assertEqual(self.manager.get_friendly_name(LIGHT_KEY), "Dining Room Light")
 
+    def test_group_defaults_to_empty_string(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.assertEqual(self.manager.get_device_group(LIGHT_KEY), "")
+
+    def test_unconfigured_device_group_is_empty_string_not_none(self):
+        self.assertEqual(self.manager.get_device_group(LIGHT_KEY), "")
+
+    def test_set_and_get_device_group(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_device_group(LIGHT_KEY, "Kitchen")
+        self.assertEqual(self.manager.get_device_group(LIGHT_KEY), "Kitchen")
+
+    def test_set_device_group_on_unknown_device_raises(self):
+        with self.assertRaises(KeyError):
+            self.manager.set_device_group(LIGHT_KEY, "Kitchen")
+
+    def test_group_persists_across_manager_instances(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_device_group(LIGHT_KEY, "Kitchen")
+        reloaded = ConfigManager(self.config_path)
+        self.assertEqual(reloaded.get_device_group(LIGHT_KEY), "Kitchen")
+
+    def test_group_can_be_cleared_back_to_empty(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_device_group(LIGHT_KEY, "Kitchen")
+        self.manager.set_device_group(LIGHT_KEY, "")
+        self.assertEqual(self.manager.get_device_group(LIGHT_KEY), "")
+
     def test_device_instance_absent_by_default(self):
         self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
         self.assertIsNone(self.manager.get_device_instance(LIGHT_KEY))
@@ -125,6 +153,44 @@ class ConfigManagerTests(unittest.TestCase):
         # must not show up as "occupying" an instance.
         self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
         self.assertEqual(self.manager.get_instances_by_kind("switch"), {})
+
+    def test_unconfigured_device_never_has_commands_enabled(self):
+        self.assertFalse(self.manager.commands_enabled_for(LIGHT_KEY))
+
+    def test_add_device_defaults_commands_enabled_to_false(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.assertFalse(self.manager.commands_enabled_for(LIGHT_KEY))
+
+    def test_add_device_with_explicit_commands_enabled_true(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True, commands_enabled=True)
+        self.assertTrue(self.manager.commands_enabled_for(LIGHT_KEY))
+
+    def test_set_commands_enabled_toggles(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.assertFalse(self.manager.commands_enabled_for(LIGHT_KEY))
+        self.manager.set_commands_enabled(LIGHT_KEY, True)
+        self.assertTrue(self.manager.commands_enabled_for(LIGHT_KEY))
+        self.manager.set_commands_enabled(LIGHT_KEY, False)
+        self.assertFalse(self.manager.commands_enabled_for(LIGHT_KEY))
+
+    def test_set_commands_enabled_on_unknown_device_raises(self):
+        with self.assertRaises(KeyError):
+            self.manager.set_commands_enabled(LIGHT_KEY, True)
+
+    def test_commands_enabled_independent_of_expose(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=False, commands_enabled=True)
+        self.assertFalse(self.manager.is_exposed(LIGHT_KEY))
+        self.assertTrue(self.manager.commands_enabled_for(LIGHT_KEY))
+
+    def test_bridge_identity_tail_generated_once_and_persisted(self):
+        tail = self.manager.get_or_create_bridge_identity_tail()
+        self.assertEqual(len(tail), 7)
+        self.assertEqual(self.manager.get_or_create_bridge_identity_tail(), tail)
+
+    def test_bridge_identity_tail_persists_across_manager_instances(self):
+        tail = self.manager.get_or_create_bridge_identity_tail()
+        reloaded = ConfigManager(self.config_path)
+        self.assertEqual(reloaded.get_or_create_bridge_identity_tail(), tail)
 
 
 class DiscoveryLogTests(unittest.TestCase):

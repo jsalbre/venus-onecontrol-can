@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Interactive tool to enable a discovered OneControl device in config.json,
+and to manage (rename, toggle expose/commands, remove) devices already
+configured. Formerly `enable-device`, renamed once it grew beyond just
+enabling new devices.
+
+UX borrowed from govee-ble-venus-py/add-sensor.sh (numbered menu of
+discovered-but-unconfigured items, pick one, confirm a name, choose whether
+to expose it immediately, offer to restart the service). The one deliberate
+difference: device_class is never asked for. It's fully determined by what
+the device itself already broadcasts (DEVICE_TYPE + FUNCTION_NAME) -- see
+dbus_bridge.device_mapping.infer_device_class() -- so asking would just be
+re-deriving something already known, the same way a human reviewing
+discovered_devices.json would. The same reasoning applies to managing an
+existing device: there is deliberately no way to edit device_class here
+either -- see ARCHITECTURE.md's "Device Class Is Inferred, Never Asked".
+
+Phase 3: for a commandable device_class, an additional default-No prompt
+offers to enable commands (write access) immediately, folded into this same
+flow rather than kept as a fully separate action -- commands_enabled
+defaults to False either way, matching expose's own default, so declining
+(or just hitting enter) leaves a newly-added device fully passive. The
+"Manage existing devices" flow can toggle commands_enabled (and expose)
+back off at any time.
+
+Devices that can't be reliably enabled at all are never shown in the
+add-device list: unsupported DEVICE_TYPEs (no service type exists for them
+in this project) and product_id-fallback keys (the known-empty/unconfigured
+Unity module ports documented in ARCHITECTURE.md -- multiple physical
+non-devices share that exact fallback identity, so there's no single
+reliable device to enable).
+
+Note on what takes effect live vs. needs a restart: toggling
+commands_enabled takes effect immediately (command_gate.py reads config
+fresh from disk on every command attempt). Toggling expose off, or removing
+a device entirely, does NOT retract it from D-Bus until the service
+restarts -- publisher.py only ever creates a device's D-Bus service, never
+tears one down in response to a config change. This tool's end-of-run
+restart prompt covers all of these the same way it always has for adding a
+device.
+
+Runs fine off the Cerbo for review (no dbus/gi dependency) -- only the
+final "restart the service" step needs to run on the actual device.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+from can_link.types import StableKey
+from dbus_bridge.command_gate import COMMANDABLE_DEVICE_CLASSES
+from dbus_bridge.config_manager import ConfigManager, DiscoveryLog
+from dbus_bridge.device_mapping import build_addable_list
+
+DEFAULT_CONFIG_PATH = Path("/data/venus-onecontrol-can/config.json")
+SERVICE_NAME = "onecontrol-can"
+
+
+def prompt_yes_no(question: str, default_yes: bool = True) -> bool:
+    suffix = "(Y/n)" if default_yes else "(y/N)"
+    answer = input(f"{question} {suffix}: ").strip().lower()
+    if not answer:
+        return default_yes
+    return answer.startswith("y")
+
+
+def _commands_label(config: ConfigManager, key: StableKey, device_class: str) -> str:
+    if device_class not in COMMANDABLE_DEVICE_CLASSES:
+        return "N/A"
+    return "Yes" if config.commands_enabled_for(key) else "No"
+
+
+def enable_one(config: ConfigManager, discovery: DiscoveryLog) -> str | None:
+    """Runs one enable cycle. Returns "added" if a device was added,
+    "manage" if the user chose to manage existing devices instead, or None
+    if they quit / made no selection."""
+    configured_keys = {d["stable_key"] for d in config.get_devices()}
+    addable = build_addable_list(discovery.entries(), configured_keys)
+
+    print()
+    print("=" * 44)
+    print("  Enable a Discovered OneControl Device")
+    print("=" * 44)
+    print()
+    if addable:
+        for i, device in enumerate(addable, start=1):
+            print(f"  {i}) {device.suggested_friendly_name}  [{device.device_class}]")
+    else:
+        print("  No newly-discovered, supported devices to add.")
+    print()
+    print("  M) Manage existing devices")
+    print("  Q) Quit")
+    print()
+    choice = input("Select a device to enable: ").strip().lower()
+    if not choice or choice == "q":
+        return None
+    if choice == "m":
+        return "manage"
+
+    try:
+        index = int(choice)
+        if not (1 <= index <= len(addable)):
+            raise ValueError
+    except ValueError:
+        print("Invalid selection.")
+        return None
+
+    device = addable[index - 1]
+
+    print()
+    print(f"Device class (inferred, not editable here): {device.device_class}")
+    name = input(f"Friendly name [{device.suggested_friendly_name}]: ").strip()
+    name = name or device.suggested_friendly_name
+    expose = prompt_yes_no("Expose on D-Bus now?", default_yes=True)
+
+    commands_enabled = False
+    if device.device_class in COMMANDABLE_DEVICE_CLASSES:
+        commands_enabled = prompt_yes_no("Enable commands for this device now?", default_yes=False)
+
+    print()
+    print("=" * 44)
+    print("  Summary")
+    print("=" * 44)
+    print(f"  Stable key:       {device.stable_key.to_config_string()}")
+    print(f"  Friendly name:    {name}")
+    print(f"  Device class:     {device.device_class}")
+    print(f"  Expose:           {expose}")
+    if device.device_class in COMMANDABLE_DEVICE_CLASSES:
+        print(f"  Commands enabled: {commands_enabled}")
+    print()
+    if not prompt_yes_no("Add this device?", default_yes=True):
+        print("Cancelled.")
+        return None
+
+    config.add_device(device.stable_key, name, device.device_class, expose=expose, commands_enabled=commands_enabled)
+    discovery.prune_configured({device.stable_key.to_config_string()})
+    print(f"\nAdded {name!r} to config.")
+    return "added"
+
+
+def manage_one_device(config: ConfigManager, stable_key_str: str) -> bool:
+    """Runs the action menu for one already-configured device, identified
+    by its stable_key config string (re-read fresh each loop, since the
+    device may be renamed or removed mid-loop). Returns True if anything
+    changed."""
+    key = StableKey.from_config_string(stable_key_str)
+    changed = False
+
+    while True:
+        device = config.find_device(key)
+        if device is None:
+            return changed  # removed this pass
+
+        device_class = device.get("device_class", "")
+        friendly_name = device.get("friendly_name", "(unnamed)")
+        expose = bool(device.get("expose"))
+        commands_enabled = bool(device.get("commands_enabled"))
+        group = device.get("group") or ""
+        # Settings/Group only exists on switch-kind services -- happens to be
+        # the exact same four device classes as COMMANDABLE_DEVICE_CLASSES.
+        is_switch = device_class in COMMANDABLE_DEVICE_CLASSES
+
+        print()
+        print("=" * 44)
+        print(f"  {friendly_name}  ({key.to_config_string()})")
+        print("=" * 44)
+        print(f"  Device class:     {device_class}")
+        print(f"  Friendly name:    {friendly_name}")
+        print(f"  Expose on D-Bus:  {'Yes' if expose else 'No'}")
+        if is_switch:
+            print(f"  Commands enabled: {'Yes' if commands_enabled else 'No'}")
+            print(f"  GUI panel group:  {group or '(none -- its own panel)'}")
+        if device.get("device_instance") is not None:
+            print(f"  D-Bus instance:   {device['device_instance']}")
+        print()
+        print("  1) Rename")
+        print(f"  2) Toggle expose (currently: {'Yes' if expose else 'No'})")
+        if is_switch:
+            print(f"  3) Toggle commands enabled (currently: {'Yes' if commands_enabled else 'No'})")
+            print(f"  4) Set GUI panel group (currently: {group or '(none)'})")
+        print("  5) Remove this device entirely")
+        print("  Q) Back")
+        print()
+        choice = input("Choose an action: ").strip().lower()
+
+        if choice == "1":
+            new_name = input(f"New friendly name [{friendly_name}]: ").strip()
+            if new_name and new_name != friendly_name:
+                config.update_friendly_name(key, new_name)
+                print(f"Renamed to {new_name!r}.")
+                changed = True
+        elif choice == "2":
+            config.set_expose(key, not expose)
+            print(f"Expose set to {not expose}.")
+            if expose:
+                print("Note: stays live on D-Bus until the service is restarted.")
+            changed = True
+        elif choice == "3" and is_switch:
+            config.set_commands_enabled(key, not commands_enabled)
+            print(f"Commands enabled set to {not commands_enabled}.")
+            changed = True
+        elif choice == "4" and is_switch:
+            new_group = input(f"GUI panel group [{group}] (blank for none, shared names group together): ").strip()
+            if new_group != group:
+                config.set_device_group(key, new_group)
+                print(f"Group set to {new_group!r}." if new_group else "Group cleared.")
+                changed = True
+        elif choice == "5":
+            print()
+            print(f"This permanently removes {friendly_name!r} from config, including its")
+            print("D-Bus device instance assignment. Stays live on D-Bus until the service")
+            print("is restarted.")
+            if prompt_yes_no("Remove this device?", default_yes=False):
+                config.remove_device(key)
+                print("Removed.")
+                return True
+            print("Cancelled.")
+        elif choice == "q" or choice == "":
+            return changed
+        else:
+            print("Invalid selection.")
+
+
+def manage_devices(config: ConfigManager) -> bool:
+    """Runs the manage-existing-devices list + per-device action loop.
+    Returns True if anything changed."""
+    changed = False
+    while True:
+        devices = config.get_devices()
+        if not devices:
+            print("\nNo configured devices yet.")
+            return changed
+
+        print()
+        print("=" * 44)
+        print("  Manage an Existing OneControl Device")
+        print("=" * 44)
+        print()
+        for i, d in enumerate(devices, start=1):
+            key = StableKey.from_config_string(d["stable_key"])
+            expose_label = "Yes" if d.get("expose") else "No"
+            commands_label = _commands_label(config, key, d.get("device_class", ""))
+            print(
+                f"  {i}) {d.get('friendly_name', '(unnamed)')}  [{d.get('device_class', '?')}]  "
+                f"expose={expose_label}  commands={commands_label}"
+            )
+        print()
+        print("  Q) Back")
+        print()
+        choice = input("Select a device to manage: ").strip().lower()
+        if not choice or choice == "q":
+            return changed
+
+        try:
+            index = int(choice)
+            if not (1 <= index <= len(devices)):
+                raise ValueError
+        except ValueError:
+            print("Invalid selection.")
+            continue
+
+        if manage_one_device(config, devices[index - 1]["stable_key"]):
+            changed = True
+
+
+def main() -> int:
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH
+    if not config_path.exists():
+        print(f"Error: config file not found: {config_path}")
+        print("Is venus-onecontrol-can installed?")
+        return 1
+
+    config = ConfigManager(config_path)
+    discovery = DiscoveryLog(config_path.parent / "discovered_devices.json")
+
+    changed_any = False
+    while True:
+        result = enable_one(config, discovery)
+        if result == "added":
+            changed_any = True
+            if not prompt_yes_no("\nEnable another device now?", default_yes=False):
+                break
+        elif result == "manage":
+            if manage_devices(config):
+                changed_any = True
+        else:
+            break
+
+    if not changed_any:
+        return 0
+
+    print()
+    if prompt_yes_no("Restart the service now to activate?", default_yes=True):
+        result = subprocess.run(["svc", "-t", f"/service/{SERVICE_NAME}"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("Service restarted.")
+        else:
+            print(f"Could not restart automatically ({result.stderr.strip()}).")
+            print(f"Restart manually with: svc -t /service/{SERVICE_NAME}")
+    else:
+        print(f"Restart manually with: svc -t /service/{SERVICE_NAME}")
+
+    print()
+    print(f"View config:  cat {config_path}")
+    print(f"Monitor logs: tail -f {config_path.parent / 'logs' / (SERVICE_NAME + '.log')}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

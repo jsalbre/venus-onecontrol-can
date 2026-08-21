@@ -116,5 +116,18 @@ class TankService:
     def close(self) -> None:
         _LOGGER.info("Closing %s", self.service_name)
         if self._dbusservice:
+            # Each service gets its own private dbus.SystemBus connection
+            # (see publisher.py's _create_service) -- __del__() releases the
+            # bus name and unregisters paths but doesn't close the
+            # underlying connection itself, and letting it fall to Python's
+            # garbage collector isn't reliable here (VeDbusService's own
+            # internal objects hold reference cycles back to it). Must close
+            # explicitly or a restart-heavy process leaks a connection per
+            # service per restart.
+            dbusconn = self._dbusservice.dbusconn
             self._dbusservice.__del__()
             self._dbusservice = None
+            try:
+                dbusconn.close()
+            except Exception as e:
+                _LOGGER.warning("%s: error closing private D-Bus connection: %s", self.service_name, e)

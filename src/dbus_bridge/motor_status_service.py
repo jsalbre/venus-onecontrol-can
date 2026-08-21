@@ -122,5 +122,12 @@ class MotorStatusService:
     def close(self) -> None:
         _LOGGER.info("Closing %s", self.service_name)
         if self._dbusservice:
+            # Explicit connection close required -- see tank_service.py's
+            # close() for why __del__() alone / relying on GC isn't enough.
+            dbusconn = self._dbusservice.dbusconn
             self._dbusservice.__del__()
             self._dbusservice = None
+            try:
+                dbusconn.close()
+            except Exception as e:
+                _LOGGER.warning("%s: error closing private D-Bus connection: %s", self.service_name, e)

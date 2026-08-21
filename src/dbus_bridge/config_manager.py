@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from can_link.address_claim import BRIDGE_IDENTITY_TAIL_LENGTH
 from can_link.types import StableKey
 from dbus_bridge.device_mapping import service_kind_for
 
@@ -117,6 +118,15 @@ class ConfigManager:
         device = self.find_device(stable_key)
         return bool(device is not None and device.get("expose") is True)
 
+    def commands_enabled_for(self, stable_key: StableKey) -> bool:
+        """The Phase 3 command safety gate's config layer: True only if this
+        stable_key has an entry in config with commands_enabled=true.
+        Missing/absent defaults to False -- a device must be explicitly
+        opted into commands, separately from (and in addition to) being
+        exposed at all. See command_gate.py, the actual enforcement point."""
+        device = self.find_device(stable_key)
+        return bool(device is not None and device.get("commands_enabled") is True)
+
     def get_device_class(self, stable_key: StableKey) -> str | None:
         device = self.find_device(stable_key)
         return device.get("device_class") if device else None
@@ -124,6 +134,27 @@ class ConfigManager:
     def get_friendly_name(self, stable_key: StableKey) -> str | None:
         device = self.find_device(stable_key)
         return device.get("friendly_name") if device else None
+
+    def get_device_group(self, stable_key: StableKey) -> str:
+        """Venus OS switch-panel group name (SwitchableOutput/0/Settings/Group
+        -- see ARCHITECTURE.md's GUI panel sort/group mechanics note).
+        Defaults to "" (ungrouped, its own panel) -- never None, since it's
+        written directly to a D-Bus path that expects a string."""
+        device = self.find_device(stable_key)
+        return (device.get("group") or "") if device else ""
+
+    def set_device_group(self, stable_key: StableKey, group: str) -> None:
+        target = stable_key.to_config_string()
+        with self._lock():
+            config = self._read_unlocked()
+            devices = config.get("devices", [])
+            for device in devices:
+                if device.get("stable_key") == target:
+                    device["group"] = group
+                    config["devices"] = devices
+                    self._atomic_write(config)
+                    return
+            raise KeyError(f"stable_key not found in config: {target}")
 
     def get_device_instance(self, stable_key: StableKey) -> int | None:
         device = self.find_device(stable_key)
@@ -167,10 +198,12 @@ class ConfigManager:
         friendly_name: str,
         device_class: str,
         expose: bool = False,
+        commands_enabled: bool = False,
     ) -> None:
         """Idempotent: updates the existing entry if stable_key is already
-        present. expose defaults to False -- adding a device must never
-        implicitly enable it."""
+        present. expose and commands_enabled both default to False -- adding
+        a device must never implicitly enable it for display or for
+        commands."""
         if device_class not in VALID_DEVICE_CLASSES:
             raise ValueError(f"invalid device_class: {device_class!r}")
 
@@ -184,6 +217,7 @@ class ConfigManager:
                     device["friendly_name"] = friendly_name
                     device["device_class"] = device_class
                     device["expose"] = expose
+                    device["commands_enabled"] = commands_enabled
                     break
             else:
                 devices.append(
@@ -192,6 +226,7 @@ class ConfigManager:
                         "friendly_name": friendly_name,
                         "device_class": device_class,
                         "expose": expose,
+                        "commands_enabled": commands_enabled,
                     }
                 )
 
@@ -222,6 +257,41 @@ class ConfigManager:
                     self._atomic_write(config)
                     return
             raise KeyError(f"stable_key not found in config: {target}")
+
+    def set_commands_enabled(self, stable_key: StableKey, commands_enabled: bool) -> None:
+        """The explicit enable/disable operation for Phase 3 commands --
+        this and add_device() are the only ways a device becomes
+        commands_enabled. Separate from set_expose(): a device can be
+        exposed (visible, read-only) without commands ever being enabled."""
+        target = stable_key.to_config_string()
+        with self._lock():
+            config = self._read_unlocked()
+            devices = config.get("devices", [])
+            for device in devices:
+                if device.get("stable_key") == target:
+                    device["commands_enabled"] = commands_enabled
+                    config["devices"] = devices
+                    self._atomic_write(config)
+                    return
+            raise KeyError(f"stable_key not found in config: {target}")
+
+    def get_or_create_bridge_identity_tail(self) -> bytes:
+        """This bridge's own synthetic 7-byte CAN identity tail (see
+        can_link/address_claim.py) -- generated once via os.urandom() and
+        persisted so it's stable across restarts. A fresh address claim
+        still happens on every restart (see address_table.py's "never trust
+        state across a gap we didn't observe" philosophy); only the
+        identity we claim with is kept stable, so this bridge's own traffic
+        stays recognizable in a live candump across restarts."""
+        with self._lock():
+            config = self._read_unlocked()
+            existing = config.get("bridge_identity_tail")
+            if existing is not None:
+                return bytes.fromhex(existing)
+            tail = os.urandom(BRIDGE_IDENTITY_TAIL_LENGTH)
+            config["bridge_identity_tail"] = tail.hex()
+            self._atomic_write(config)
+            return tail
 
     def update_friendly_name(self, stable_key: StableKey, friendly_name: str) -> None:
         target = stable_key.to_config_string()

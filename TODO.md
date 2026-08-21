@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 1.4 | **Updated:** 2026-08-20
+**Version:** 1.8 | **Updated:** 2026-08-21
 
 ---
 
@@ -35,11 +35,27 @@
 - [x] Fixed a deployment-process bug found in the process: an initial partial-file copy (just `enable-device` itself) broke with `ImportError: cannot import name 'build_addable_list'` since it depends on modules not yet synced. Fixed by always doing a full tarball sync + `setup install auto` (which handles the service restart itself, no manual `svc -d`/`svc -u` needed) -- documented in README.md and `dev-notes/VENUS_OS_CONSTRAINTS.md`.
 - [ ] Battery voltage service is not implemented in Phase 2 (deferred, matches the low-priority PID item above -- Phase 2 makes no bus transmissions at all, including reads).
 
-## Phase 3 — Safe Commands (blocked on Phase 2)
+## Phase 3 — Safe Commands (implemented 2026-08-20, not yet rolled out to real hardware)
 
-- Wire up `switch_service.py` write paths, session handshake, and command send with the safety gate active.
-- Test with a single low-consequence device before enabling the rest.
-- Run a real or simulated OneControl power-loss test to confirm the outage safety gate works.
+- [x] Empirically determined the real CAN address-claim procedure via a live power-cycle capture (`samples/poweroutage_capture.log`) rather than hardcoding an address -- see ARCHITECTURE.md's "Address Claiming" design decision. `can_link/address_claim.py` (claim/announce frame codec, `AddressClaimer` state machine, `ActiveAddressTracker`) + `tests/test_address_claim.py` (23 tests, real-capture fixtures).
+- [x] Found and corrected a real discrepancy: the community-documented dimmable-light COMMAND byte layout (`brightness 1-100`) didn't match real hardware. A follow-up real capture of an actual brightness-slider drag (`samples/dimming_capture.log`) resolved it -- brightness is a raw 0-255 scale, and a plain on/off tap uses a separate simplified toggle command (`mode=0x7F`/all-zero) distinct from the granular `mode=1,brightness=N` command. `can_link/command.py` fixed and re-tested against both captures.
+- [x] `can_link/command_sequencer.py` (`CommandAttempt` -- async TEA-handshake-through-COMMAND state machine, re-verifies `address_table.resolve_for_command()` a second time immediately before building the COMMAND frame) + `tests/test_command_sequencer.py` (13 tests, using the real captured handshake trace as the happy-path fixture).
+- [x] `dbus_bridge/command_mapping.py` (device_class -> CanFrame dispatch, including percent<->raw-byte brightness conversion) + `dbus_bridge/command_gate.py` (the layered command safety gate: exposed + commands_enabled + supported device_class + address_table verification) + tests for both.
+- [x] `dbus_bridge/config_manager.py`: `commands_enabled_for()`/`set_commands_enabled()`, `add_device(..., commands_enabled=False)`, `get_or_create_bridge_identity_tail()`.
+- [x] `switch_service.py`: `/SwitchableOutput/0/State` and (for dimmable lights) `/SwitchableOutput/0/Dimming` both writeable, both still always return `False` (GUI reverts immediately, matching Phase 2's UX) but now report the write upward via `on_command()`.
+- [x] `publisher.py`: address claiming on startup + steady-state self-announcement, RESPONSE-frame routing to pending `CommandAttempt`s, a 500ms timeout sweep, and bus-outage-triggered immediate abort of every pending command.
+- [x] `enable-device` (renamed `manage-devices` -- see below): optional default-No `commands_enabled` prompt, shown only for commandable device classes, folded into the existing add-device flow rather than kept separate.
+- [x] `enable-device` renamed to `manage-devices` and extended with a "Manage existing devices" mode (2026-08-20): rename, toggle `expose`/`commands_enabled`, remove -- all built on `ConfigManager` methods that already existed and were already unit tested (`update_friendly_name`, `set_expose`, `set_commands_enabled`, `remove_device`) but had no CLI caller until now. `device_class` is still never editable, matching the add-flow's existing "inferred, never asked" design. Smoke-tested end-to-end locally (add, rename, toggle both flags, remove).
+- [x] Full test suite green (275 tests) and `py_compile` clean across all dbus/gi-dependent modules.
+- [x] Post-implementation resource audit (2026-08-20): found and fixed a GLib timer/IO-watch leak across crash-restarts (never removed, compounding forever -- includes real duplicate CAN traffic from the self-announce timer), unguarded `self.bus.send()` calls that could crash the whole main loop over one transient write error, and un-closed private D-Bus connections per service on `close()`. See CHANGELOG.md for details.
+- [x] First real-hardware deployment (2026-08-21): address claim succeeded, commands confirmed working end-to-end on a dimmable light (both on/off and brightness-slider). Found and fixed two more real bugs from this test: rapid slider-drag writes were refused outright instead of coalesced (see CHANGELOG.md -- could have left the light on an earlier drag position, not just log noise); switch panels had no predictable sort order and couldn't be grouped, root-caused against `gui-v2`'s own source (missing root `/CustomName`, and `/SwitchableOutput/0/Settings/Group` was never registered) and fixed, plus `Settings/Group` support added to `manage-devices`. 281 tests passing.
+- [x] Fixed a real outage after a Venus OS firmware update (2026-08-21): service stayed up (`svstat`) but published nothing, since `vecan1` came back administratively `DOWN` and nothing brought it back up -- interface bring-up had always been an external/manual responsibility (Phase 0's original design). `SocketCanBus` now brings its own interface up if it isn't already (idempotent, kernel `IFF_UP`-flag check), self-healing across firmware updates or any other cause. Also documented (previously unwritten) exactly how SetupHelper's boot-time package-reinstall mechanism is supposed to work, for diagnosing future "service didn't come back after a firmware update" reports that turn out not to be this. See CHANGELOG.md, `dev-notes/VENUS_OS_CONSTRAINTS.md`, `ARCHITECTURE.md`.
+- [x] Follow-up (2026-08-21): that fix only covered the interface going down at (re)connect time. Confirmed on real hardware that a mid-run outage (interface goes down while already connected) instead flooded the log with one WARNING per dropped frame, since `recv()` never errors in that state. `Publisher._send_frame()` now catches write failures directly, retries `ensure_interface_up()` immediately then rate-limited to once per 15s (fixed interval, not exponential -- discussed with the user first), with edge-triggered logging instead of per-frame spam.
+- [ ] **Not yet done -- next steps before this is trusted on the coach:**
+  - [ ] Confirm a `commands_enabled: false` device really transmits nothing (parallel `candump`).
+  - [ ] Run a real OneControl power-loss test to confirm in-flight commands abort cleanly and a device needs a fresh post-outage DEVICE_ID before being command-eligible again (this exercises the *second* `resolve_for_command()` check, not just the address table's own already-unit-tested outage behavior).
+  - [ ] Confirm the panel sort-order and grouping fixes on real hardware after the next redeploy (implemented and unit tested, not yet observed live).
+  - [ ] Only then, enable remaining devices one at a time, watching logs each time.
 
 ## Future — GitHub-Based Auto-Update (not started, deliberately deferred)
 

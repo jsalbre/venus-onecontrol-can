@@ -1,16 +1,16 @@
 # venus-onecontrol-can
 
-**Version:** 0.4.0 (Phase 2 deployed and working) | **Updated:** 2026-08-20
+**Version:** 0.5.1 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-21
 
 ---
 
 ## What This Is
 
-Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN" protocol — not RV-C) to a Victron Cerbo GX MK2's spare CAN interface, so tank levels and light/relay/pump/water-heater state appear natively in the Venus OS GUI and VRM, and (from Phase 3 on) those same devices can be controlled from there.
+Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN" protocol — not RV-C) to a Victron Cerbo GX MK2's spare CAN interface, so tank levels and light/relay/pump/water-heater state appear natively in the Venus OS GUI and VRM, and those same devices can be controlled from there.
 
 **Motor-driven devices (awnings, slides, leveling jacks) are read-only.** This project never sends a command that could move one — see `ARCHITECTURE.md` for why.
 
-**A device is only ever published to D-Bus if it has an explicit `expose: true` entry in `config.json`.** Everything discovered on the bus but not configured is logged to `discovered_devices.json` for review, never exposed automatically.
+**A device is only ever published to D-Bus if it has an explicit `expose: true` entry in `config.json`, and only ever commandable if it separately has `commands_enabled: true`.** Everything discovered on the bus but not configured is logged to `discovered_devices.json` for review, never exposed automatically.
 
 ---
 
@@ -18,7 +18,7 @@ Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN
 
 - Phase 0 (wiring + capture) and Phase 1 (decoder validation) are done, confirmed against real traffic from this coach.
 - Phase 2 (D-Bus publishing) is deployed and confirmed working on the real Cerbo: tank and water pump switch services registered on D-Bus, values update live, and the read-only safety gate is confirmed live (a GUI write attempt was correctly rejected and logged, not silently accepted or actually applied).
-- Phase 3 (commands) is not started.
+- Phase 3 (commands) is implemented and unit tested (275 tests passing) but **not yet deployed or exercised on real hardware** — see `TODO.md`'s Phase 3 section for the exact rollout steps still needed before enabling commands on the real coach.
 
 See `TODO.md` for the detailed phase checklist.
 
@@ -31,7 +31,7 @@ See `TODO.md` for the detailed phase checklist.
    - **Enable** CAN bus termination (120Ω) on the Cerbo side — it is now a true bus end.
    - **Remove** the terminator from whatever device was previously the bus's end, so there are still exactly two terminators total, one at each true end. Leaving the old one in place along with the new one at the Cerbo overloads the bus past what the transceivers can drive.
 3. If no frames appear once wired, try swapping CANH/CANL — reversed polarity causes silence, not damage.
-4. Bring the interface up at 250 kbit/s (confirmed interface name on this Cerbo: `vecan1`):
+4. The service brings the interface up itself (at 250 kbit/s, confirmed interface name on this Cerbo: `vecan1`) on every connection attempt if it isn't already up — including after a Venus OS firmware update, which can leave it administratively down. No manual step needed. If you ever want to bring it up by hand (e.g. to check traffic with `candump` before the service is installed):
    ```bash
    ip link set vecan1 up type can bitrate 250000
    ```
@@ -82,18 +82,20 @@ tar xzf /tmp/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
 
 (Note: `setup`'s `INSTALL_FILES` step is a no-op for this package -- it only matters for packages that patch pre-existing Venus OS system files via a `fileList`, which this project doesn't have or need. File placement is handled by the `tar` extraction above, not by `setup` itself, until/unless this project moves to GitHub-based installs.)
 
-Edit `/data/venus-onecontrol-can/config.json` on the Cerbo to enable specific devices (`expose: true`) before or after installing — the service reloads config on every restart. Prefer `enable-device` (below) over hand-editing where possible.
+Edit `/data/venus-onecontrol-can/config.json` on the Cerbo to enable specific devices (`expose: true`) before or after installing — the service reloads config on every restart. Prefer `manage-devices` (below) over hand-editing where possible.
 
 ---
 
-## Enabling Devices
+## Enabling and Managing Devices
 
-Once running, the service logs every device it sees on the bus but isn't configured to `discovered_devices.json`, next to `config.json`. Use `enable-device` to review that list and add one interactively:
+Once running, the service logs every device it sees on the bus but isn't configured to `discovered_devices.json`, next to `config.json`. Use `manage-devices` to review that list and add a device interactively, or to change/remove a device already configured:
 
 ```bash
-/data/venus-onecontrol-can/enable-device
+/data/venus-onecontrol-can/manage-devices
 ```
 
-It shows a numbered menu of addable devices (already-configured devices and devices with no supported service type are filtered out automatically), lets you pick one, confirms a friendly name (defaulting to Lippert's own name for it) and whether to expose it, then offers to restart the service. `device_class` is never asked for — it's inferred automatically from what the device itself broadcasts (its DEVICE_TYPE and FUNCTION_NAME), the same way a human reviewing the discovery log would work it out.
+Its first menu shows a numbered list of addable devices (already-configured devices and devices with no supported service type are filtered out automatically); pick one to add it, confirming a friendly name (defaulting to Lippert's own name for it) and whether to expose it, then offers to restart the service. `device_class` is never asked for — it's inferred automatically from what the device itself broadcasts (its DEVICE_TYPE and FUNCTION_NAME), the same way a human reviewing the discovery log would work it out. For a commandable device_class (lights, pump, water heater), it also asks — separately, defaulting to No — whether to enable commands now; a device can be exposed (visible, read-only) without ever being made commandable.
 
 Devices using the `(PRODUCT_ID, instance)` fallback key (unconfigured/unnamed inputs — see `ARCHITECTURE.md`'s stable-key design decision) are never offered, since multiple physical (non-)devices share that exact fallback identity and there's no single reliable device to enable there.
+
+Choose `M) Manage existing devices` from that same first menu to rename a device, toggle its `expose`/`commands_enabled` flags, or remove it entirely (`device_class` still isn't editable there, for the same reason it's never asked at add time). Toggling `commands_enabled` takes effect immediately; toggling `expose` off or removing a device doesn't retract it from D-Bus until the service restarts — the tool's end-of-run restart prompt covers this the same way it always has for adding a device.

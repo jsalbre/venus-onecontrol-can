@@ -2,12 +2,16 @@
 dimmable light device (lights, water pump, water heater). Follows the real
 SwitchableOutput path structure used by victronenergy/dbus-shelly.
 
-Phase 2 (current): read-only. /SwitchableOutput/0/State is registered
-writeable=True (so it renders as a normal interactive switch in the Cerbo
-GUI, matching how Shelly switches look), but the onchange callback always
-rejects the write and logs clearly -- there is no command path wired up
-yet. Phase 3 will replace the rejecting callback with a real one that
-drives can_link.command/session through the address table's safety gate.
+Phase 3: /SwitchableOutput/0/State (and, for dimmable lights,
+/SwitchableOutput/0/Dimming) are writeable. Both onchange callbacks always
+return False -- the GUI reverts immediately, exactly like Phase 2 did --
+but now also report the write upward via on_command(), which triggers a
+real background command attempt (publisher.py/command_sequencer.py). This
+class stays a dumb reporter: it never decides whether a command is allowed
+(command_gate.py) or builds the CAN frame (command_mapping.py); real state
+only ever changes via update_relay()/update_dimmable() being called from an
+actually-confirmed DEVICE_STATUS broadcast, never from a write attempt
+itself -- so there is no separate "pending" UI state to manage here.
 
 Never used for motor-type devices (awning/slide/jack) -- see
 motor_status_service.py and ARCHITECTURE.md's "No Motor Commands" boundary.
@@ -48,6 +52,7 @@ PRODUCT_NAME = "OneControl Switch"
 
 _CHANNEL = 0
 _PATH_BASE = f"/SwitchableOutput/{_CHANNEL}/"
+_ROOT_CUSTOM_NAME_PATH = "/CustomName"
 
 
 class SwitchService:
@@ -60,12 +65,18 @@ class SwitchService:
         firmware_version: str,
         dbusconn=None,
         on_name_change=None,
+        on_command=None,
+        initial_group: str = "",
+        on_group_change=None,
     ) -> None:
         self.stable_key = stable_key
         self.friendly_name = friendly_name
         self.device_class = device_class
         self.device_instance = device_instance
         self.on_name_change = on_name_change
+        self.on_command = on_command
+        self.group = initial_group
+        self.on_group_change = on_group_change
         self.is_dimmable = device_class == "dimmable_light"
 
         self.service_name = f"com.victronenergy.switch.onecontrol_{stable_id_for(stable_key)}"
@@ -77,29 +88,71 @@ class SwitchService:
         self._dbusservice.register()
 
         _LOGGER.info(
-            "Registered %s (instance=%d, device_class=%s, Phase 2 read-only)",
+            "Registered %s (instance=%d, device_class=%s)",
             self.service_name,
             device_instance,
             device_class,
         )
 
     def _handle_name_change(self, path, value):
+        """Shared callback for both name paths (root /CustomName and the
+        per-channel Settings/CustomName) -- since this service only ever
+        has one channel, they're the same concept and are kept in sync
+        regardless of which one was edited (real Venus OS device-list vs.
+        the per-output settings page)."""
         if value != self.friendly_name:
             self.friendly_name = value
+            with self._dbusservice as s:
+                for name_path in (_ROOT_CUSTOM_NAME_PATH, _PATH_BASE + "Settings/CustomName", _PATH_BASE + "Name"):
+                    if name_path != path:
+                        s[name_path] = value
             if self.on_name_change:
                 self.on_name_change(self.stable_key, value)
         return True
 
-    def _reject_state_write(self, path, value):
-        """Phase 2: no command path is wired up yet. Reject every write
-        attempt rather than silently accept a value the device never
-        actually received."""
-        _LOGGER.warning(
-            "%s: rejected write to %s=%r -- command path not implemented yet (Phase 3)",
+    def _handle_group_change(self, path, value):
+        """Settings/Group -- purely a GUI panel-grouping label (see
+        ARCHITECTURE.md's GUI panel sort/group mechanics note); this
+        service does nothing with the value itself beyond persisting it."""
+        if value != self.group:
+            self.group = value
+            if self.on_group_change:
+                self.on_group_change(self.stable_key, value)
+        return True
+
+    def _handle_state_write(self, path, value):
+        """Always returns False (the GUI reverts immediately, matching
+        Phase 2's UX) -- the real state only ever changes via a confirmed
+        DEVICE_STATUS broadcast reaching update_relay()/update_dimmable().
+        Reports the write upward; on_command() (publisher.py) is
+        responsible for deciding whether it's actually allowed and, if so,
+        attempting it in the background."""
+        desired_on = bool(value)
+        # DEBUG, not INFO: fires on every D-Bus write, e.g. once per tick
+        # while dragging a slider -- see command_gate.py/publisher.py's
+        # completed/refused logging for the meaningful-outcome trail.
+        _LOGGER.debug("%s: write requested %s=%r (desired_on=%s)", self.service_name, path, value, desired_on)
+        if self.on_command:
+            self.on_command(self.stable_key, desired_on, None)
+        return False
+
+    def _handle_dimming_write(self, path, value):
+        """A specific Dimming write of 0 means "turn off"; 1-100 means
+        "turn on at exactly this percentage" (see command_mapping.py)."""
+        desired_pct = int(value)
+        desired_on = desired_pct > 0
+        # DEBUG, not INFO: fires on every D-Bus write, e.g. once per tick
+        # while dragging a slider -- see the note in _handle_state_write.
+        _LOGGER.debug(
+            "%s: write requested %s=%r (desired_on=%s, desired_brightness_pct=%s)",
             self.service_name,
             path,
             value,
+            desired_on,
+            desired_pct if desired_on else None,
         )
+        if self.on_command:
+            self.on_command(self.stable_key, desired_on, desired_pct if desired_on else None)
         return False
 
     def _add_paths(self, firmware_version: str) -> None:
@@ -114,6 +167,15 @@ class SwitchService:
             hardwareversion=None,
             connected=CONNECTED,
         )
+        self._dbusservice.add_path(
+            _ROOT_CUSTOM_NAME_PATH,
+            value=self.friendly_name,
+            writeable=True,
+            onchangecallback=self._handle_name_change,
+            description="Device name -- distinct from /ProductName, which is identical across every "
+            "OneControl switch device and would otherwise make every panel tie on the GUI's "
+            "alphabetical device sort (confirmed against gui-v2's BaseDevice::name()/device.cpp).",
+        )
 
         output_type = output_type_for(self.device_class)
         output_function = output_function_for(self.device_class)
@@ -122,8 +184,8 @@ class SwitchService:
             _PATH_BASE + "State",
             value=0,
             writeable=True,
-            onchangecallback=self._reject_state_write,
-            description="0=off, 1=on (read-only until Phase 3)",
+            onchangecallback=self._handle_state_write,
+            description="0=off, 1=on",
         )
         self._dbusservice.add_path(
             _PATH_BASE + "Status", value=STATUS_OFF, description="0=off, 9=on"
@@ -136,6 +198,14 @@ class SwitchService:
             onchangecallback=self._handle_name_change,
             description="Custom name",
         )
+        self._dbusservice.add_path(
+            _PATH_BASE + "Settings/Group",
+            value=self.group,
+            writeable=True,
+            onchangecallback=self._handle_group_change,
+            description="GUI panel group -- devices sharing a non-empty group name are shown "
+            "together in one panel instead of each getting its own.",
+        )
         self._dbusservice.add_path(_PATH_BASE + "Settings/Type", value=int(output_type), writeable=False)
         self._dbusservice.add_path(
             _PATH_BASE + "Settings/Function", value=int(output_function), writeable=False
@@ -146,7 +216,13 @@ class SwitchService:
         )
 
         if self.is_dimmable:
-            self._dbusservice.add_path(_PATH_BASE + "Dimming", value=0, description="0-100%")
+            self._dbusservice.add_path(
+                _PATH_BASE + "Dimming",
+                value=0,
+                writeable=True,
+                onchangecallback=self._handle_dimming_write,
+                description="0-100%",
+            )
 
     def update_relay(self, status: RelayOrMotorStatus) -> None:
         is_on = status.output_state != OutputState.OFF_STOP
@@ -181,5 +257,12 @@ class SwitchService:
     def close(self) -> None:
         _LOGGER.info("Closing %s", self.service_name)
         if self._dbusservice:
+            # Explicit connection close required -- see tank_service.py's
+            # close() for why __del__() alone / relying on GC isn't enough.
+            dbusconn = self._dbusservice.dbusconn
             self._dbusservice.__del__()
             self._dbusservice = None
+            try:
+                dbusconn.close()
+            except Exception as e:
+                _LOGGER.warning("%s: error closing private D-Bus connection: %s", self.service_name, e)
