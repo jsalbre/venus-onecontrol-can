@@ -1,0 +1,527 @@
+OneControl / IDS-CAN Protocol Notes
+For other people building their own bridges to a Lippert OneControl (Unity)
+CAN bus. Written from a project targeting a Victron Cerbo GX, but everything
+below is about the wire protocol itself, not that hardware -- should apply
+to any bridge implementation.
+
+Sources used, cross-validated against each other and against real captured
+traffic from one coach (a Unity X270 board):
+  - andrewcfitz/esphome-onecontrol (community reverse-engineering, "IDS-CAN.md")
+  - D-Jeffrey/UnityX-canbus (community reverse-engineering, "IDS-coding.md")
+  - manos/OneControl-RV-C-Protocol -- this one's worth calling out specifically.
+    It includes a decompiled copy of the LippertConnect Android app's
+    "IDS_Core_CAN" assemblies. That decompiled C# source is where most of the
+    detail below (the full PID catalog, the FUNCTION_NAME table, the SESSION_ID
+    catalog, the RESPONSE enum) actually came from -- not guessed, not
+    reverse-engineered from traffic, just read directly out of the app's own
+    code.
+  - Lippert's own official "OneControl Configurator Guide" (doc CCD-0001830,
+    publicly available PDF) -- useful for confirming what reconfiguration
+    features actually exist in official tooling, since not everything in the
+    decompiled catalog turns out to be meaningful (see the PID section below).
+
+Nothing below should be trusted blindly just because it's decompiled or came
+from someone else's doc -- we found real discrepancies between the
+community docs and real hardware (see the dimmable-light command section),
+and real cases where a decompiled PID catalog entry turned out not to apply
+to our specific hardware family at all. Wherever we say "confirmed," we mean
+confirmed against our own real hardware, not just "found in a decompile."
+Wherever we say "decompiled-only" or "unconfirmed," treat it as a strong
+lead, not a fact -- test it yourself before relying on it.
+
+
+1. PHYSICAL / LINK LAYER
+-------------------------
+250 kbit/s, ISO 11898-1, big-endian multi-byte fields, single-frame only (no
+ISO-TP / multi-frame reassembly anywhere in this protocol). The bus mixes
+standard 11-bit and extended 29-bit CAN IDs -- you have to check the frame's
+IDE/extended flag per-frame, you can't assume one width for the whole bus.
+
+
+2. CAN ID STRUCTURE
+--------------------
+Confirmed byte-exact against the decompiled IDS_CAN.CAN_ID struct.
+
+Standard 11-bit (used for broadcasts):
+  SourceAddress = id & 0xFF
+  MessageType   = (id >> 8) & 0x7
+
+  MessageType values: 0=NETWORK, 1=CIRCUIT_ID, 2=DEVICE_ID, 3=DEVICE_STATUS,
+  6=PRODUCT_STATUS, 7=TIME.
+
+Extended 29-bit (used for point-to-point request/response/command):
+  SourceAddress = (id >> 18) & 0xFF
+  TargetAddress = (id >> 8) & 0xFF
+  MessageData   = id & 0xFF
+  MessageType   = 0x80 | ((id >> 24) & 0x1C) | ((id >> 16) & 0x3)
+
+  MessageType values (all >=0x80): 128=REQUEST, 129=RESPONSE, 130=COMMAND,
+  131=EXT_STATUS, 132=TEXT_CONSOLE, 133=GROUP_ID. There are a few more
+  (155=DAQ, 157=IOT, 159=BULK_XFER) that exist in the firmware but don't
+  cleanly fit this bit formula -- we never needed them and left them
+  unconfirmed/out of scope.
+
+  For REQUEST/RESPONSE frames, MessageData carries the request code (see
+  section 6 for the PID-related ones, section 5 for session-handshake ones).
+  For COMMAND frames, MessageData carries the command mode for relay-style
+  commands (see section 7).
+
+
+3. DEVICE_ID BROADCAST (message type 2, CAN ID = 0x200 | addr, ~1 Hz)
+------------------------------------------------------------------------
+8-byte payload:
+  byte 0-1: PRODUCT_ID (uint16 BE)
+  byte 2:   product instance
+  byte 3:   DEVICE_TYPE (enum -- tank, relay/motor, dimmable light, etc.)
+  byte 4-5: FUNCTION_NAME (uint16 BE, enum -- see section 4)
+  byte 6:   high nibble = device instance, low nibble = function instance
+  byte 7:   capabilities bitfield (we never fully decoded this)
+
+This is the inventory broadcast -- every device on the bus announces itself
+this way roughly once a second. DEVICE_STATUS (below) is the live-state
+broadcast; you need a device's DEVICE_ID first to know how to interpret its
+DEVICE_STATUS payload, since the byte layout depends on DEVICE_TYPE.
+
+
+4. WHERE DEVICE NAMES ACTUALLY COME FROM
+------------------------------------------
+This tripped us up initially: device names ("Kitchen Island Light", "Scare
+Light", etc.) are never transmitted on the bus in any form. Only the
+numeric FUNCTION_NAME code (2 bytes in DEVICE_ID, see above) goes over CAN.
+
+The LippertConnect app resolves that numeric code locally, against a static
+table baked into the app itself. We pulled this table directly out of the
+decompiled app (the `FUNCTION_NAME` class in the assembly containing
+IDS_Core_CAN) -- it's a flat, complete enum from 0 to 445, no gaps, e.g.:
+
+  FUNCTION_NAME(38, "Kitchen Island Light", ICON.LIGHT)
+  FUNCTION_NAME(122, "Scare Light", ICON.LIGHT)
+
+There's no cloud lookup, no per-floorplan config file, nothing coach-specific
+involved -- every installation's app ships the identical table. The display
+logic is simply "{FUNCTION_NAME.Name} {instance}" when the instance is
+nonzero (so two FUNCTION_NAME=105 "Awning" devices with instances 1 and 2
+display as "Awning 1" / "Awning 2").
+
+Practical upshot: if you want your own bridge to show real device names
+instead of raw numeric codes, you need this same table. It's not something
+you can derive from bus traffic alone -- you have to pull it from the app
+(decompile, or find someone else's extraction of it). We confirmed our
+extracted copy is complete and matches what the real app displays.
+
+One duplicate is real, not a transcription error: FUNCTION_NAME codes 109
+and 142 both map to "Leveler" in the table. Not a bug on our end.
+
+
+5. STABLE DEVICE IDENTITY (don't use the CAN source address as a key)
+------------------------------------------------------------------------
+The 8-bit CAN source address (the one in DEVICE_ID/DEVICE_STATUS broadcasts,
+and the one you address REQUEST/COMMAND frames to) is NOT a fixed per-device
+identifier. It's dynamically pool-assigned and can change across power
+cycles depending on boot order. We confirmed this against the decompiled
+firmware directly: there's an `AddressDetectManager` that frees an address
+via `GetUnusedDeviceAddress()` after roughly 5 seconds of silence from that
+address, making it available for reassignment to whatever claims it next.
+
+If you persist any config keyed on raw source address, expect it to
+silently point at the wrong device after a breaker reset or battery
+disconnect.
+
+What's actually stable is the pair (FUNCTION_NAME, function_instance) from
+DEVICE_ID -- these come from the device's own stored configuration, not
+renegotiated per boot. Use that as your persistent key, and maintain a
+live, continuously-refreshed table mapping that key to the device's
+*current* source address (refreshed from DEVICE_ID broadcasts, expired
+after a short window of not being seen).
+
+This isn't just a workaround we invented -- it's independently confirmed as
+the right approach by Lippert's own gateway code. The decompiled
+`DeviceInstanceManager.GetAvailableDeviceInstanceClaim` method re-associates
+a reconnecting device by matching its FunctionKey (FUNCTION_NAME +
+FunctionInstance) *before* falling back to anything address-based. Lippert's
+own software uses this exact strategy internally to survive address churn.
+
+Caveat: an unconfigured/empty physical input port on the controller board
+broadcasts FUNCTION_NAME=0 and won't be reliably distinguishable from other
+similarly-unconfigured ports using only bus data (they may also share
+PRODUCT_ID/instance). This is expected -- it just means an empty port looks
+like an empty port. Nothing wrong with your decoder if you see this.
+
+One more edge case worth knowing: FUNCTION_NAME/instance are stable but not
+strictly immutable. A rename feature exists (writes PIDs 4/5, see section 8)
+that moves a device to a different (FUNCTION_NAME, instance) pair. This is a
+deliberate, rare user action via commissioning/configuration, not something
+that happens spontaneously -- we don't defend against it happening mid-run,
+and you probably don't need to either unless your users are actively
+reconfiguring devices while your bridge is running.
+
+
+6. CLAIMING YOUR OWN BUS ADDRESS
+-----------------------------------
+If your bridge needs to send anything (a PID read, a command, whatever), it
+needs a CAN source address of its own first. None of the three community
+doc sources we started from documented this procedure -- we decoded it
+directly from a captured real power-cycle/reconnect on our coach (32 real
+devices claiming 32 distinct addresses, zero collisions in that capture).
+
+Claim frame: standard (11-bit) CAN ID 0x000 -- note this is NOT the
+claimant's own address, it's a fixed reserved ID for claim frames. 8-byte
+payload: [candidate_address (1 byte), identity_tail (7 bytes)]. A real
+example from our capture (an awning motor claiming 0x2A):
+
+  ID 000, data: 2A 1E 00 00 00 30 2B 3E
+
+About 1.0 second later (this matches the decompiled firmware's
+ADDRESS_CLAIM_TIMEOUT constant exactly), the device transitions to
+steady-state broadcasting, including a NETWORK-type broadcast (message type
+0) whose payload is [0x00, *same identity_tail*] -- i.e. the same 7-byte
+tail as the claim frame, but the leading byte changes from the candidate
+address to 0x00:
+
+  ID 02A, data: 00 1E 00 00 00 30 2B 3E   (about 1.003s after the claim above)
+
+The identity_tail is not guaranteed unique per physical device -- in our
+capture, 29 of 32 real devices shared one identical tail (presumably a
+common firmware image for that relay/light board), with only 3 distinct
+tails across every device model on the coach. So you don't need to try to
+impersonate a real device's identity -- generate your own random 7-byte
+tail once and persist it (or just regenerate per run if you don't care
+about it being stable across restarts).
+
+Address 0x00 should never be claimed as your own candidate. Your own
+steady-state NETWORK broadcast from address 0x00 would encode to CAN ID
+0x000 -- identical to the claim-frame ID itself. No real device in our
+capture ever claimed it either, which is consistent with 0x00 being a real
+protocol-level reservation, not a coincidence.
+
+Our own contention handling is deliberately simple (retry with a new
+candidate on contention, back off after repeated failures) rather than
+replicating the real firmware's full arbitration logic, since we never
+actually observed contention in a real capture -- 32-for-32 clean claims.
+Your mileage may vary with a busier/larger installation; you may want to
+implement more of the real contention-avoidance logic if you see collisions
+in practice.
+
+
+7. SESSION HANDSHAKE (needed before COMMAND frames, and before some PID
+   writes)
+------------------------------------------------------------------------
+A device won't act on a COMMAND frame, and won't accept certain PID writes,
+until you've completed a session handshake with it. This is a
+challenge-response scheme using a modified TEA (Tiny Encryption Algorithm)
+transform.
+
+Request codes (sent as REQUEST-type frames, MessageData = request code):
+  0x42 (66) SESSION_REQUEST_SEED  -- payload [0x00, session_id]
+  0x43 (67) SESSION_TRANSMIT_KEY  -- payload [0x00, session_id, key(4 bytes BE)]
+  0x45 (69) SESSION_END           -- payload [0x00, session_id]
+
+Flow:
+  1. Send SESSION_REQUEST_SEED. Device replies with a 6-byte payload:
+     [0x00, session_id, seed(4 bytes BE)].
+  2. Run the seed through the transform below to get a 32-bit key.
+  3. Send SESSION_TRANSMIT_KEY with that key.
+  4. Device replies (session is now open). Send your COMMAND frame(s) or
+     privileged PID write(s).
+  5. Send SESSION_END when done. Sessions also auto-expire after 5 seconds
+     of silence -- if you're holding a session open for something that
+     takes a while, you need to keep sending *something* within that
+     window or it'll close on you.
+
+The transform (32-round modified TEA):
+  k = <session cypher constant, see table below>
+  d = 0x9E3779B9          (standard TEA delta)
+  v = seed
+
+  repeat 32 times:
+    v += (((k << 4) + 1131376761) ^ (k + d) ^ ((k >> 5) + 1919510376))
+    k += (((v << 4) + 1948272964) ^ (v + d) ^ ((v >> 5) + 1400073827))
+    d += 0x9E3779B9
+    (all arithmetic mod 2^32)
+
+  resulting v (after all 32 rounds) is the key you send back.
+
+There are multiple session types, each with its own cypher constant fed
+into that same transform as the initial k. This is per the decompiled
+SESSION_ID class:
+
+  session_id  name            cypher constant   status
+  1           MANUFACTURING   0xB16BA115        decompiled-only, untested by us
+  2           DIAGNOSTIC      0xBABECAFE        CONFIRMED real (see section 8)
+  3           REPROGRAMMING   0xDEADBEEF        decompiled-only, untested by us
+  4           REMOTE_CONTROL  0xB16B00B5        CONFIRMED real, used for COMMAND frames
+  5           DAQ             0x0B00B135        decompiled-only, untested by us
+
+REMOTE_CONTROL (4) is what you need for ordinary commands (turning lights
+on/off, setting dim level, running a pump, etc.) -- we validated this cypher
+constant against 8 independently captured real seed/key pairs from actual
+OneControl app sessions, all matching exactly.
+
+DIAGNOSTIC (2) is what gates certain PID writes (device rename, and at
+least one device-behavior setting -- see section 8). We only recently
+validated this one for the first time: opened a real DIAGNOSTIC session
+against real hardware, and it worked (the device accepted a subsequent PID
+write under that session). Before that, this cypher constant was
+decompiled-only and unconfirmed.
+
+The other three (MANUFACTURING, REPROGRAMMING, DAQ) remain decompiled-only
+as far as we know -- we have no real captures or successful real usage of
+any of them. If you experiment with these, be aware you're on your own,
+further out past what's actually been validated.
+
+
+8. COMMAND FRAMES (turning things on/off, dimming)
+-----------------------------------------------------
+Sent as COMMAND-type frames (message type 130) after a REMOTE_CONTROL
+session (section 7) is open.
+
+There are two genuinely different payload shapes depending on device type.
+Don't try to unify them -- sending the wrong shape to the wrong device type
+causes silent, un-acknowledged discard, not an error you can catch.
+
+Relay-style commands (lights-on-a-relay, pumps, water heaters, etc.):
+  The command mode goes in the CAN ID's MessageData byte itself (0=OFF,
+  1=ON, 3=CLEAR_LATCH -- values we've confirmed). The payload MUST be
+  empty (0 bytes). Any payload bytes at all cause the device to silently
+  discard the frame -- no NAK, nothing to catch. Confirmed against two real
+  relay commands (a water pump and a relay-driven light).
+
+Dimmable light commands:
+  MessageData byte = 0. 8-byte payload:
+    [mode, brightness, auto_off_minutes, t1_hi, t1_lo, t2_hi, t2_lo, reserved]
+
+  IMPORTANT correction to what the community docs say: brightness is a raw
+  0-255 byte, NOT a 1-100 percentage. This directly contradicts at least
+  one of the community reverse-engineering docs we started from. We only
+  caught this because a real captured brightness-slider-drag (5 distinct
+  commands, each producing an immediate matching DEVICE_STATUS report)
+  showed values like 0x3E, 0xB5, 0xFF -- clearly a 0-255 scale, and matching
+  DEVICE_STATUS's own current_brightness byte scale exactly, byte for byte.
+  If you built against the "1-100" documentation, your dimming will be
+  wrong (either clamped early or missing the top of the range).
+
+  There's also a separate, simpler command for a plain on/off tap (as
+  opposed to a slider drag setting a specific level):
+    mode = 0x7F, rest zero  -> turns on at the light's own last-remembered
+                                brightness (0x7F is a "resume" sentinel,
+                                not part of the normal 0-3 mode enum)
+    all bytes zero          -> turns off
+
+  auto_off_minutes / t1 / t2 (cycle timing, presumably for blink/swell
+  modes) were never exercised in either of our real captures -- always
+  zero in both. We don't know their real behavior; treat as unconfirmed.
+
+
+9. SAFETY APPROACH WE'D RECOMMEND (regardless of what hardware you're
+   bridging to)
+------------------------------------------------------------------------
+A few things we found worth doing that aren't protocol requirements, just
+good practice given how this bus behaves:
+
+  - Re-verify a device's current address immediately before actually
+    sending a COMMAND, not just when you started building the command. A
+    session handshake takes a few round trips; if the bus had an outage or
+    the target device's address changed mid-handshake, you want to catch
+    that right before the frame with real physical effect goes out, not
+    rely on a check you did a few milliseconds (or longer) earlier.
+
+  - Track bus-wide liveness (timestamp of the most recent frame from *any*
+    device), separately from per-device address freshness. A per-device
+    "last seen" timestamp can look fresh even when the whole bus lost power
+    and came back with devices claiming addresses in a different order --
+    only a bus-wide liveness check catches that case. On a detected outage,
+    treat every cached address mapping as unverified until you see a fresh
+    DEVICE_ID for that device again.
+
+  - We deliberately never implemented motor commands (awnings, slides,
+    leveling jacks) for safety reasons: commanding a motor requires holding
+    an open session with a heartbeat while it's moving, and losing that
+    session (5-second timeout, section 7) means losing your ability to send
+    STOP. If your session handling isn't rock solid, a dropped session
+    mid-motion is a real safety problem, not just an inconvenience. We're
+    not saying it's impossible to do safely, just that we chose not to
+    without a much more careful design than a simple relay/dimmer command
+    needs.
+
+  - For PID writes specifically (section 10): we gate ours behind a
+    deliberately separate, explicitly-confirmed manual tool rather than
+    anything automatic. A bad PID write on a device you don't have official
+    reconfiguration hardware (a touchscreen) for has no obvious revert
+    path. Treat write capability as something to expose carefully, not
+    casually.
+
+
+10. READING AND WRITING PIDs (device settings/diagnostics)
+--------------------------------------------------------------
+Beyond the broadcasts, there's a request/response mechanism for reading (and,
+we've now confirmed, writing) individual numbered settings/diagnostic values
+("PIDs" in Lippert's own terminology -- unrelated to Unix process IDs).
+
+Three request codes, all sent as REQUEST-type frames:
+
+  0x10  PID_READ_LIST      -- enumerate every PID a specific device supports
+  0x11  PID_READ_WRITE     -- read (short payload) or write (longer payload)
+                               a specific PID
+  0x12  PID_GET_PROPERTIES -- ask whether a PID is writable and what session
+                               it requires
+
+PID_READ_LIST (0x10):
+  Request payload is a page number, uint16 BE. Page 0 is special. Real
+  replies are always exactly 8 bytes, padded with PID=0/Flags=0 placeholder
+  entries when there isn't enough real data to fill the frame -- you MUST
+  track the total count from page 0's header and stop once you've collected
+  that many real entries, not just stop when entries "run out," since a
+  padding entry isn't distinguishable from a real PID=0 by shape alone.
+
+    page 0 reply:  [echo(2)=0x0000][total_count(2)][reserved(1)=0x00][entry?]
+    page N>0 reply: [echo(2)=page][entry][entry?]
+    each entry: [PID(2, BE), Flags(1)]
+
+  We built this specifically because guessing PID numbers from a decompiled
+  catalog turned out to be unreliable (see the DEVICE_TYPE/LOAD_TYPE story
+  below) -- if you can, always ask a specific real device what it actually
+  supports rather than assuming a catalog applies to your hardware family.
+
+PID_READ_WRITE (0x11), reading:
+  Request payload is just the PID as uint16 BE. Reply: [PID(2, BE), value
+  bytes...] -- the value's width comes from the DLC (payload length), not a
+  fixed type size. We've seen a nominally-4-byte value arrive truncated to
+  3 bytes with a leading zero omitted, so don't assume a fixed width per
+  PID when reading.
+
+  Confirmed real error-reply shape: [0x0000][echoed requested PID(2)]
+  [RESPONSE code(1)] -- 5 bytes. See the RESPONSE code table below.
+
+PID_READ_WRITE (0x11), writing:
+  Same request code, distinguished purely by a longer payload: [PID(2, BE),
+  value bytes...]. This is the part that took us two attempts to get right:
+  a write's value must be sent at the PID's FULL declared type width, not
+  whatever truncated width a read happens to return. We first tried writing
+  a 1-byte value (matching what a read of that PID returned) and got
+  RESPONSE.BAD_REQUEST back. Retrying with the PID's full nominal width (6
+  bytes, since its declared type was a 48-bit unsigned int) succeeded. The
+  BAD_REQUEST (not a session/auth error code) was the tell that the *shape*
+  of our request was wrong, not our authorization to make it.
+
+  A confirmed real successful write reply looks exactly like a normal
+  successful read reply -- [PID(2, BE), value bytes...], DLC-truncated the
+  same way. No separate "write acknowledged" format; the device just
+  replies as if you'd read the (now-updated) value.
+
+  A confirmed real BAD_REQUEST write error reply was just a single raw
+  byte (the RESPONSE code alone) -- notably shorter than the 5-byte read
+  error shape above. We've only observed this one error case for a write;
+  other write error codes may have different shapes, unconfirmed.
+
+  Writing (at least some) PIDs requires a session first -- and not
+  necessarily REMOTE_CONTROL. See section 7's SESSION_ID table; the PIDs
+  we've had to write so far require DIAGNOSTIC (session_id 2), confirmed
+  working.
+
+PID_GET_PROPERTIES (0x12):
+  Same request payload shape as a read (PID as uint16 BE). Confirmed real
+  error reply: [echoed requested PID(2)][RESPONSE code(1)] -- 3 bytes, note
+  no leading 0x0000 field here unlike PID_READ_WRITE's error shape. We
+  believe the decompiled source describes a real successful reply as "PID +
+  Flags + SessionId" but we don't have a confirmed real example of one yet
+  -- treat the exact byte widths for a successful reply as unconfirmed.
+
+RESPONSE codes (from the decompiled `enum RESPONSE : byte`, plain
+sequential values starting at 0 -- we've confirmed several of these against
+real replies, not just trusted the decompile):
+  0  SUCCESS
+  1  REQUEST_NOT_SUPPORTED
+  2  BAD_REQUEST
+  3  VALUE_OUT_OF_RANGE
+  4  UNKNOWN_ID
+  5  VALUE_TOO_LARGE
+  6  INVALID_ADDRESS
+  7  READ_ONLY
+  8  WRITE_ONLY
+  9  CONDITIONS_NOT_CORRECT
+  10 FEATURE_NOT_SUPPORTED
+  11 BUSY
+  12 SEED_NOT_REQUESTED
+  13 KEY_NOT_CORRECT
+  14 SESSION_NOT_OPEN
+  15 TIMEOUT
+  16 REMOTE_REQUEST_NOT_SUPPORTED
+  17 IN_MOTION_LOCKOUT_ACTIVE
+  18 CRC_INVALID
+  19 CANCELLED
+  20 ABORTED
+  21 FAILED
+  22 IN_PROGRESS
+
+A cautionary tale about the decompiled PID catalog: it lists numbered
+constants like DEVICE_TYPE (183) and LOAD_TYPE (451) that looked like
+promising candidates for reconfiguring a device's fundamental type/behavior.
+We tried reading both against three different real devices on our hardware
+(two dimmable lights and, as a cross-check, a tank sensor with a known
+different real device type) and got byte-identical replies across all
+three -- turned out to be RESPONSE.UNKNOWN_ID every time. Neither PID
+number is recognized on our hardware family at all. Our working theory is
+that the decompiled catalog we pulled from may cover a broader/different
+Lippert product line than just the Unity X270, and not every PID number in
+it applies to every board. Lesson: don't trust a PID number just because
+it's in a decompiled catalog with a promising-sounding name -- confirm it's
+actually supported on your specific hardware via PID_READ_LIST first.
+
+
+11. THE ONE RECONFIGURATION WE'VE ACTUALLY CONFIRMED WORKING
+-----------------------------------------------------------------
+Concrete problem we had: one of our board's dimming-capable outputs (driving
+a light fixture) behaved as a plain on/off latch -- any dim-level command
+under 100% just snapped back to 100%, both in the official app and in our
+own bridge. The official Lippert Configurator Guide confirms there's no
+"convert this output between dimmer and relay" feature in official tooling
+at all -- the only dimmer-adjacent setting exposed there is DEVICE SWITCH
+TYPE (Toggle vs Momentary), which is about a physical wall switch's
+behavior, not the output's own dimming capability. So this wasn't something
+we could just go find in the app.
+
+We used PID_READ_LIST against both the misbehaving light and a known-good
+dimmer on the same board type. Both reported an identical set of ~97
+supported PIDs with identical per-PID flags -- so the difference wasn't
+which settings existed, it was a value within that shared set. Cross-
+referencing all ~97 PID numbers against the full named catalog in the
+decompiled source turned up PID 161, named SIMULATE_ON_OFF_STYLE_LIGHT in
+Lippert's own code -- a name that matched our symptom almost exactly.
+Reading it confirmed the theory directly: it read as true (1) on the
+misbehaving light, false (0) on the working one -- the only difference
+between the two devices anywhere in that ~97-PID set.
+
+Writing PID 161 = 0 (over a DIAGNOSTIC session, at its full 6-byte declared
+width per section 10) succeeded, and we confirmed the fix both on the wire
+(read-back) and physically -- the light dims correctly now, and the
+official app itself now renders it as a dimmer too, after an app restart
+(the app apparently reads this same PID to decide how to display the
+device).
+
+Separately, device rename/reassignment is also confirmed real and
+documented in the official Configurator Guide (its "DEVICE NAME" section,
+shown there being used on a device the touchscreen displays as "UNKNOWN").
+That's PID 4 (FUNCTION_NAME) and PID 5 (FUNCTION_INSTANCE) -- the same two
+fields that show up in every DEVICE_ID broadcast (section 3). Both are also
+DIAGNOSTIC-session-gated per the decompiled catalog; we haven't personally
+exercised a real write of these two yet (only PID 161 so far), but we're
+confident in the mechanism given everything else above about DIAGNOSTIC
+writes has checked out.
+
+We don't have any way to validate further reconfiguration PIDs without
+guessing -- our installation has no physical touchscreen (the only official
+tool that can reconfigure a device at all; the phone app can't, at least on
+iOS -- reconfiguration code exists in the decompiled app but has no UI entry
+point exposed). If any of you do have touchscreen access, a real capture of
+it doing a reconfiguration action would be extremely valuable -- that's the
+one category of evidence we can't produce ourselves.
+
+
+A closing note on methodology, since it's probably the most transferable
+thing here: almost everything above that turned out to be wrong-as-first-
+documented (the dimming brightness scale, the DEVICE_TYPE/LOAD_TYPE PIDs,
+the write value width) was only caught by testing against real hardware and
+paying attention when the result didn't match what a doc or a decompile
+predicted, rather than trusting either source on its own. The decompiled
+source is enormously useful for generating good hypotheses fast, but it's
+not a substitute for confirming them against your own real device.

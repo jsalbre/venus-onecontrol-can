@@ -77,6 +77,10 @@ Two real goals: (1) assign a name/function to a currently-unused Unity X270 inpu
 - [ ] **Deferred, not started:** production integration -- `manage-devices` UI for reconfiguration, PID 4/5 rename/reassign support (mechanism confirmed, not yet built), any automatic/production write path in `publisher.py`. `pid_write.py` remains a manual, one-shot diagnostic tool for now; this is a separate planning pass if/when a permanent feature is wanted.
 - **On the FUNCTION_NAME=0 collision (13 of 31 devices in the 2026-08-19 capture sharing an identical fallback `(PRODUCT_ID=232, instance=42)` stable key):** per the user, these are understood to just be unused/unconfigured physical input connections on the Unity module itself (empty ports with nothing wired to them) — not mystery devices needing investigation. Once the write path exists, the PID 4/5 mechanism above is how one of those ports would get a real name assigned.
 
+## Later — Documentation Cleanup (not started)
+
+- `ARCHITECTURE.md`, `dev-notes/ARCHITECTURE.md`, and this file have all grown by incremental append-as-we-go edits across many real-hardware findings (Phase 0 through the PID reconfiguration work) and are due for a pass to tighten/reorganize -- some sections likely have redundant or superseded narrative (e.g. multiple "confirmed X, then later confirmed Y more precisely" passages that could collapse into one current statement) now that the underlying investigations are actually finished. Low priority, no functional impact -- come back to this when there's a lull, not urgent.
+
 ## Not Planned (deliberate scope boundary)
 
 - Motor control (awnings/slides/leveling jacks) — read-only status only. Requires separate explicit re-approval, not a followup TODO.
