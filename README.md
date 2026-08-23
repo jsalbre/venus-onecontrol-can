@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.1 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-21
+**Version:** 0.5.2 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-22
 
 ---
 
@@ -26,12 +26,13 @@ See `TODO.md` for the detailed phase checklist.
 
 ## Hardware Setup
 
-1. Wire the Cerbo GX MK2's spare/second CAN interface to the OneControl bus.
+1. Wire the Cerbo GX MK2's spare/second CAN interface to the OneControl bus. On the Unity board's connector, CAN H goes to pin 7 and CAN L goes to pin 8 on the Cerbo's CAN interface connector.
 2. This installation wires the Cerbo in as the new physical end of the bus (not a mid-bus tap), so:
-   - **Enable** CAN bus termination (120Ω) on the Cerbo side — it is now a true bus end.
+   - **Add termination (120Ω)** on the Cerbo side by plugging a terminator into the Cerbo CAN interface's unused plug — it is now a true bus end. There is no software/config setting for this; it's a physical terminator connector.
    - **Remove** the terminator from whatever device was previously the bus's end, so there are still exactly two terminators total, one at each true end. Leaving the old one in place along with the new one at the Cerbo overloads the bus past what the transceivers can drive.
 3. If no frames appear once wired, try swapping CANH/CANL — reversed polarity causes silence, not damage.
-4. The service brings the interface up itself (at 250 kbit/s, confirmed interface name on this Cerbo: `vecan1`) on every connection attempt if it isn't already up — including after a Venus OS firmware update, which can leave it administratively down. No manual step needed. If you ever want to bring it up by hand (e.g. to check traffic with `candump` before the service is installed):
+4. In Venus OS's own settings, set this CAN interface's profile to **disabled** — otherwise Venus OS's own CAN-bus service tries to manage the port itself. The interface still exists at the kernel level for this project's raw SocketCAN access either way.
+5. The service brings the interface up itself (at 250 kbit/s, confirmed interface name on this Cerbo: `vecan1`) on every connection attempt if it isn't already up — including after a Venus OS firmware update, which can leave it administratively down. No manual step needed. If you ever want to bring it up by hand (e.g. to check traffic with `candump` before the service is installed):
    ```bash
    ip link set vecan1 up type can bitrate 250000
    ```

@@ -28,7 +28,6 @@ Thumbs.db
 *.log
 
 # Private development files
-dev-notes/
 samples/
 
 # Actual runtime config/state (your real device inventory) -- config.example.json

@@ -20,11 +20,10 @@ Bridges a Lippert OneControl RV control system (proprietary "IDS-CAN" protocol, 
 | `TODO.md` | Active planned work | Public |
 | `ARCHITECTURE.md` | Design decisions and rationale, plus the full protocol/technical reference (byte layouts, PID tables, platform constraints) | Public |
 | `ONECONTROL_CAN_PROTOCOL_NOTES.txt` | Plain-text protocol writeup for sharing with other OneControl bridge builders | Public |
-| `dev-notes/` | Raw coach-specific reference data not otherwise in version control | Private, gitignored |
-| `samples/` | Raw CAN captures from this coach (coach-specific address/PID data) | Private, gitignored |
+| `samples/` | Raw CAN captures and coach-specific reference data (e.g. physical wiring inventory) | Private, gitignored |
 
 ---
 
 ## Private Docs
 
-`dev-notes/` and `samples/` are gitignored. They contain raw coach-specific reference data (e.g. physical wiring inventories) and raw CAN captures specific to this RV's OneControl installation. Never commit these directories.
+`samples/` is gitignored. It contains raw CAN captures and coach-specific reference data (e.g. physical wiring inventories) specific to this RV's OneControl installation. Never commit this directory. No `docs-private/` currently exists -- nothing yet warrants it (personal process notes, AI session logs, prompt receipts, reflections); add it if that changes.
