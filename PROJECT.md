@@ -1,6 +1,6 @@
 # PROJECT
 
-**Version:** 1.0 | **Updated:** 2026-08-18
+**Version:** 1.1 | **Updated:** 2026-08-22
 
 ---
 
@@ -19,7 +19,8 @@ Bridges a Lippert OneControl RV control system (proprietary "IDS-CAN" protocol, 
 | `CHANGELOG.md` | Append-only release history | Public |
 | `TODO.md` | Active planned work | Public |
 | `ARCHITECTURE.md` | Design decisions and rationale | Public |
-| `dev-notes/` | AI-session working reference (technical detail, platform constraints, session continuity) | Private, gitignored |
+| `ONECONTROL_CAN_PROTOCOL_NOTES.txt` | Plain-text protocol writeup for sharing with other OneControl bridge builders | Public |
+| `dev-notes/` | AI-session working reference (technical detail, platform constraints) | Private, gitignored |
 | `samples/` | Raw CAN captures from this coach (coach-specific address/PID data) | Private, gitignored |
 
 ---

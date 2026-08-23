@@ -517,6 +517,93 @@ it doing a reconfiguration action would be extremely valuable -- that's the
 one category of evidence we can't produce ourselves.
 
 
+12. DISAMBIGUATING UNCONFIGURED DEVICES (device_instance, not just
+    product_instance)
+------------------------------------------------------------------------
+Section 5 covers the general stable-key problem. There's a sharper version
+of it worth calling out separately: multiple *unconfigured* devices on the
+same physical control module can be completely indistinguishable using the
+stable-key fallback alone.
+
+We ran into this trying to identify one specific unused output (a spare
+dimming-capable-board latching output) among several similar unused ones.
+The fallback stable key uses (PRODUCT_ID, product_instance) from DEVICE_ID
+(section 3) -- but on our hardware, product_instance turned out to be a
+single shared generic default across the ENTIRE physical control module,
+regardless of what kind of peripheral it is (outputs, tank inputs, water
+heater control, generator I/O, etc.). Every unconfigured device on the
+module reports the identical (PRODUCT_ID, product_instance) pair. That's
+enough to say "this is an unconfigured port on this module" but nothing
+more -- it doesn't get you down to one specific physical port.
+
+DEVICE_ID byte 6's high nibble (which we'd been calling device_instance,
+distinct from the low nibble's function_instance) turned out to be the
+real answer. It's a sequential, gapless counter -- but scoped per
+DEVICE_TYPE across the whole module, not per physical connector bank and
+not a fixed silkscreen/terminal number. Querying every device of a given
+DEVICE_TYPE on the module (both already-named ones and unconfigured ones
+together) gets you a clean, complete sequence: e.g. if a module has 9 total
+latching-relay-type circuits across several different physical connector
+groups, querying all of them (PID_READ_LIST isn't needed for this -- just
+DEVICE_ID broadcasts) returns device_instance values 1 through 9 with zero
+gaps, regardless of which connector group each one is physically wired
+into.
+
+This is genuinely useful because you can anchor the sequence using devices
+you already know: if you know a specific named device occupies position 7
+in that sequence, and you know your board's physical connector layout
+(count of latching outputs per bank, in board order), you can work out
+which unconfigured device_instance corresponds to which physical unused
+port -- without needing a decompiled source's help at all, just DEVICE_ID
+broadcasts and your own board's documentation.
+
+Don't trust the sequence-position inference on its own though -- cross-
+check it against something independently verifiable if you can. Two things
+worked for us: PID_READ_WRITE reads of a fuse/rating-type PID (see section
+10) that happened to differ for one specific physical position (a
+higher-current pump output vs. everything else nearby reading the same
+lower rating) gave a real electrical fact that matched the predicted
+identity exactly; and a device's capabilities_raw byte (DEVICE_ID's final
+byte, largely undecoded) turned out to reliably split a tank-sensor group
+into two sub-types matching a real physical distinction (potable-water-type
+inputs vs. LP/fuel-type inputs) that lined up with the sequence-based guess
+independently. Neither of these generalizes to your hardware automatically
+-- the point is: look for ANY independently-checkable signal (a real
+electrical rating, a capability bit, a status field) that should differ
+between your candidates, and see if it agrees with the position-based
+guess, before trusting it.
+
+The only fully certain way to confirm a specific mapping, short of that
+kind of lucky cross-check, is a direct physical test: briefly send a real
+relay ON command (same mechanism as section 8, just targeted at a raw
+address with no name/config attached to it yet) and watch the actual
+physical output with a multimeter or by ear (relays audibly click even
+with nothing wired to the load side). We built a small manual tool for
+exactly this -- open a session, ON, brief hold, OFF -- gated behind an
+explicit confirmation flag, since unlike everything else in this document
+it has a real (if minor, since nothing should be connected except test
+equipment) physical side effect. We haven't run it yet as of writing this,
+so we can't tell you whether the sequence-based inference actually panned
+out -- but the tool and technique are sound regardless of that specific
+result.
+
+One more thing worth flagging honestly: we went hunting for a PID that
+would let us identify a wired local switch from the OUTPUT side (i.e.
+"which output is this specific physical switch wired to"), on the theory
+that some boards attach a local-switch pin assignment to the output's own
+config rather than exposing the input as its own bus device. We do NOT
+have a source for that being a real, general Lippert behavior -- it was
+our own guess based on a promisingly-named PID (ON_OFF_INPUT_PIN). What we
+DO have is real data: reading that PID across every device we had
+configured, one specific device (the one with a known physical local
+switch) read a distinct nonzero value while every other device read zero,
+and that value matched the specific input connector position we already
+suspected from our own wiring documentation. That's a real, consistent
+result worth trying on your own hardware -- but it's still an inference
+from observed data, not a confirmed, documented mechanism. Don't take our
+word for what it means without checking it against your own board.
+
+
 A closing note on methodology, since it's probably the most transferable
 thing here: almost everything above that turned out to be wrong-as-first-
 documented (the dimming brightness scale, the DEVICE_TYPE/LOAD_TYPE PIDs,
