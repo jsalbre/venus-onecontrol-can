@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 3.0 | **Updated:** 2026-08-22
+**Version:** 3.1 | **Updated:** 2026-08-22
 
 ---
 
@@ -31,10 +31,10 @@ Address claiming, command sequencer, layered command safety gate, and writeable 
 
 ## Future Phase — Device Reconfiguration via CAN
 
-Two real goals: (1) assign a name/function to a currently-unused Unity module input/output, (2) fix a real problem -- one of the module's dimming-capable outputs behaved as a plain on/off latch instead of a dimmer. Both PID write mechanics and the goal-2 root cause (PID 161) are fully researched, confirmed, and fixed on real hardware; goal 1's disambiguation problem (picking a specific unconfigured port out of many that share an identical fallback stable key) is substantially solved via `device_instance`. See `CHANGELOG.md` and `ARCHITECTURE.md`'s `device_instance` section for full detail.
+Two real goals: (1) assign a name/function to a currently-unused Unity module input/output, (2) fix a real problem -- one of the module's dimming-capable outputs behaved as a plain on/off latch instead of a dimmer. Both PID write mechanics and the goal-2 root cause (PID 161) are fully researched, confirmed, and fixed on real hardware; goal 1's disambiguation problem (picking a specific unconfigured port out of many that share an identical fallback stable key) is solved and physically confirmed for the target port via `device_instance`. See `CHANGELOG.md` and `ARCHITECTURE.md`'s `device_instance` section for full detail.
 
-- [ ] **Deferred, not started:** production integration -- `manage-devices` UI for reconfiguration, PID 4/5 rename/reassign support (mechanism confirmed, not yet built), any automatic/production write path in `publisher.py`. `pid_write.py` remains a manual, one-shot diagnostic tool for now; this is a separate planning pass if/when a permanent feature is wanted.
-- [ ] **Not yet done:** the relay-blip physical confirmation of the `device_instance`-based candidate mapping -- deferred by the user to a later session (needs to be at the rig with a multimeter). Until run, the mapping is "high confidence," not confirmed -- do not write PID 4/5 to any of these addresses before this step.
+- [x] **Relay-blip physical confirmation done (2026-08-22):** `relay_blip.py` run for real against both DIMM/LATCH output 7 and output 8 -- both confirmed correct against the `device_instance`-based candidate mapping. Also caught and fixed a real bug in the tool itself (default hold matched the session timeout exactly, briefly leaving output 7 stuck on).
+- [ ] **Deferred, not started:** production integration -- `manage-devices` UI for reconfiguration, PID 4/5 rename/reassign support (mechanism confirmed, not yet built), any automatic/production write path in `publisher.py`. `pid_write.py` remains a manual, one-shot diagnostic tool for now; this is a separate planning pass if/when a permanent feature is wanted. Output 7's address is now physically confirmed, so this is the real remaining blocker before actually renaming it.
 - [ ] **Open side-investigation, not blocking:** PID 238 (`ON_OFF_INPUT_PIN`) looks like it records which "Configurable Input" position is wired as a device's local switch -- well-supported by real evidence but not confirmed by documentation or a physical test. PID 146 (`INPUT_SWITCH_TYPE`)'s meaning is unknown -- no enum found in the decompiled source, no observed value variation yet. The "Configurable Inputs" bank itself (3 wired-but-uncommissioned positions) has no matching visible CAN device at all in the unconfigured pool -- genuinely unresolved.
 
 ## Not Planned (deliberate scope boundary)
