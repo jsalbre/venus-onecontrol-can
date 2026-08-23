@@ -176,7 +176,7 @@ Reconfiguring a device -- assigning a real name/function to a currently-unused U
 - 250 kbit/s, ISO 11898-1, big-endian multi-byte fields, single-frame only (no ISO-TP/multi-frame).
 - Bus mixes standard 11-bit and extended 29-bit CAN IDs — must check `CAN_EFF_FLAG` per frame, not assume one width.
 - Termination: exactly two 120Ω terminators at true bus ends. This installation wires the Cerbo in as the new physical end of the bus, so a terminator is plugged into the Cerbo CAN interface's unused plug (a physical connector, not a software/config setting), and the terminator must be removed from whatever device was previously the bus's end (not left in place alongside the new one — three terminators overloads the bus past what the transceivers can drive).
-- CANH/CANL polarity: reversed wiring causes silence, not damage — safe to swap and retry. On this coach's wiring, the Unity board's CAN H goes to pin 7 and CAN L to pin 8 on the Cerbo's CAN interface connector.
+- CANH/CANL polarity: reversed wiring causes silence, not damage — safe to swap and retry. The Unity board's CAN H goes to pin 7 and CAN L to pin 8 on the Cerbo's CAN interface connector — the same across all Unity boards and Cerbo GX devices, not specific to this installation.
 - Venus OS's own CAN-bus service must have this interface's profile set to **disabled** in Venus OS settings, or it tries to manage the port itself — the interface remains available at the kernel level for this project's raw SocketCAN access regardless. See README.md's Hardware Setup section for the full procedure.
 
 ### CAN ID Structure
