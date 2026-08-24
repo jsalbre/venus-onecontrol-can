@@ -84,14 +84,14 @@ class Publisher:
             bus_outage_threshold_sec=self.config.get("bus_outage_threshold_sec", 12.0),
         )
         self._address_to_key: dict[int, StableKey] = {}
-        self.services: dict[str, _ServiceEntry] = {}
+        self.services: dict[StableKey, _ServiceEntry] = {}
 
         self._identity_tail = self.config_manager.get_or_create_bridge_identity_tail()
         self._active_tracker = address_claim.ActiveAddressTracker()
         self._claimer = address_claim.AddressClaimer(identity_tail=self._identity_tail)
         self._bridge_address: int | None = None
-        self._pending_commands: dict[str, CommandAttempt] = {}
-        self._queued_commands: dict[str, tuple[str, bool, int | None]] = {}
+        self._pending_commands: dict[StableKey, CommandAttempt] = {}
+        self._queued_commands: dict[StableKey, tuple[str, bool, int | None]] = {}
 
         self.bus: SocketCanBus | None = None
         self._can_interface: str | None = None
@@ -250,8 +250,7 @@ class Publisher:
         key = self._address_to_key.get(decoded.source_address)
         if key is None:
             return
-        key_str = key.to_config_string()
-        attempt = self._pending_commands.get(key_str)
+        attempt = self._pending_commands.get(key)
         if attempt is None or attempt.target_address != decoded.source_address:
             return
 
@@ -259,7 +258,7 @@ class Publisher:
         for frame in frames:
             self._send_frame(frame)
         if attempt.is_done:
-            self._finalize_command_attempt(key_str, attempt)
+            self._finalize_command_attempt(attempt)
 
     def _handle_device_id(self, source_address: int, payload: bytes, now: float) -> None:
         try:
@@ -272,9 +271,7 @@ class Publisher:
         self.address_table.observe_device_id(key, source_address, identity.device_type, now)
         self._address_to_key[source_address] = key
 
-        routing = route_device_id(
-            key, identity, self.config_manager, already_created=key.to_config_string() in self.services
-        )
+        routing = route_device_id(key, identity, self.config_manager, already_created=key in self.services)
 
         if routing.action == DeviceIdAction.NOT_EXPOSED:
             type_label = identity.device_type.name if identity.device_type else f"RAW_{identity.device_type_raw}"
@@ -335,14 +332,14 @@ class Publisher:
             _LOGGER.error("Failed to create service for %s: %s", key.to_config_string(), e, exc_info=True)
             return
 
-        self.services[key.to_config_string()] = _ServiceEntry(service, device_class, kind)
+        self.services[key] = _ServiceEntry(service, device_class, kind)
         _LOGGER.info("Created %s service for %s (%s)", kind, key.to_config_string(), friendly_name)
 
     def _handle_device_status(self, source_address: int, payload: bytes, now: float) -> None:
         key = self._address_to_key.get(source_address)
         if key is None:
             return
-        entry = self.services.get(key.to_config_string())
+        entry = self.services.get(key)
         if entry is None:
             return
 
@@ -379,9 +376,9 @@ class Publisher:
             _LOGGER.warning("Refusing command for %s: bridge has no claimed CAN address yet", key_str)
             return
 
-        existing = self._pending_commands.get(key_str)
+        existing = self._pending_commands.get(key)
         if existing is not None and not existing.is_done:
-            self._queued_commands[key_str] = (decision.device_class, desired_on, desired_brightness_pct)
+            self._queued_commands[key] = (decision.device_class, desired_on, desired_brightness_pct)
             # DEBUG, not INFO: expected and frequent while e.g. dragging a
             # brightness slider -- _finalize_command_attempt()'s
             # completed/did-not-complete logging is the meaningful outcome.
@@ -414,7 +411,7 @@ class Publisher:
             build_command_frame=build_frame,
             resolve_for_command=self.address_table.resolve_for_command,
         )
-        self._pending_commands[key_str] = attempt
+        self._pending_commands[key] = attempt
         # DEBUG, not INFO: one per attempt, which during a slider drag can
         # be frequent -- the outcome (_finalize_command_attempt(), below)
         # is what's actually worth seeing by default.
@@ -424,7 +421,9 @@ class Publisher:
         )
         self._send_frame(attempt.start(now))
 
-    def _finalize_command_attempt(self, key_str: str, attempt: CommandAttempt) -> None:
+    def _finalize_command_attempt(self, attempt: CommandAttempt) -> None:
+        key = attempt.key
+        key_str = key.to_config_string()
         if attempt.succeeded:
             # DEBUG, not INFO: fires once per successful switch/dimmer
             # action -- routine, and the real confirmation a human cares
@@ -434,34 +433,34 @@ class Publisher:
             _LOGGER.debug("Command for %s completed", key_str)
         else:
             _LOGGER.warning("Command for %s did not complete: %s", key_str, attempt.failure_reason)
-        self._pending_commands.pop(key_str, None)
+        self._pending_commands.pop(key, None)
 
-        queued = self._queued_commands.pop(key_str, None)
+        queued = self._queued_commands.pop(key, None)
         if queued is None:
             return
         _, desired_on, desired_brightness_pct = queued
         now = time.time()
-        decision = evaluate_command_request(attempt.key, self.config_manager, self.address_table, now)
+        decision = evaluate_command_request(key, self.config_manager, self.address_table, now)
         if decision.result != CommandGateResult.OK:
             _LOGGER.warning("Refusing queued command for %s: %s", key_str, decision.result.value)
             return
         self._send_command(
-            attempt.key, decision.device_class, decision.target_address, desired_on, desired_brightness_pct, now
+            key, decision.device_class, decision.target_address, desired_on, desired_brightness_pct, now
         )
 
     def _abort_all_pending_commands(self, reason: str) -> None:
-        for key_str, attempt in list(self._pending_commands.items()):
+        for key, attempt in list(self._pending_commands.items()):
             attempt.abort(reason)
-            _LOGGER.warning("Aborted in-flight command for %s: %s", key_str, reason)
+            _LOGGER.warning("Aborted in-flight command for %s: %s", key.to_config_string(), reason)
         self._pending_commands.clear()
         self._queued_commands.clear()
 
     def _check_pending_command_timeouts(self) -> bool:
         now = time.time()
-        for key_str, attempt in list(self._pending_commands.items()):
+        for attempt in list(self._pending_commands.values()):
             if attempt.check_timeout(now):
                 attempt.abort("timed out waiting for a response")
-                self._finalize_command_attempt(key_str, attempt)
+                self._finalize_command_attempt(attempt)
         return True
 
     def _start_address_claim(self) -> None:

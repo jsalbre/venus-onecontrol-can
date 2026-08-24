@@ -95,11 +95,13 @@ class TankService:
 
     def update(self, status: TankSensorStatus) -> None:
         now = time.time()
-        self._dbusservice["/Level"] = status.fill_level_pct
-        if self._dbusservice["/Status"] == STATUS_DISCONNECTED:
+        was_disconnected = self._dbusservice["/Status"] == STATUS_DISCONNECTED
+        with self._dbusservice as s:
+            s["/Level"] = status.fill_level_pct
+            s["/Status"] = STATUS_OK
+            s["/Connected"] = 1
+        if was_disconnected:
             _LOGGER.info("%s: reconnected", self.service_name)
-        self._dbusservice["/Status"] = STATUS_OK
-        self._dbusservice["/Connected"] = 1
         self.last_update_time = now
 
     def mark_disconnected(self) -> None:

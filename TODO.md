@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 3.5 | **Updated:** 2026-08-24
+**Version:** 3.6 | **Updated:** 2026-08-24
 
 ---
 
@@ -37,6 +37,10 @@ Two real goals: (1) assign a name/function to a currently-unused Unity module in
 - [x] **`manage-system` built (2026-08-22):** interactive tool for module-level reconfiguration -- configure a port (identity + applicable known settings like PID 161), unconfigure a port, or back up every port's current settings. Distinct from `manage-devices` (D-Bus config only). Reused/extended `probe_common.py` with shared session-open/close, test-blip, and board-scan helpers (also refactored into `pid_write.py`/`relay_blip.py`/`list_unconfigured.py`, behavior-preserving). Full test suite green (312 tests).
 - [x] **First real-hardware run (2026-08-23) failed, root cause found and fixed (2026-08-24), confirmed working end-to-end (2026-08-24):** renaming DIMM/LATCH output 7 (PID 4/5 writes) both failed against real hardware. Root cause: `build_pid_write_request()` sized the value at each PID's own declared `Formatter` width (2 bytes for PID 4, 1 for PID 5) instead of the real, universal 6-byte (`UInt48`) width every PID write actually requires -- confirmed by reading the decompiled LippertConnect `WritePidAsync`/`PAYLOAD.FromArgs` source directly, not guessed. Fixed and retried the same day: output 7 renamed to "Front Cap Light," both writes verified `PASS`, physically tested, added to `config.json`, and now live/controllable in the OneControl app. Closes out the original "assign a name to an unused port" goal. See `ARCHITECTURE.md`'s "PID Writes" section and `CHANGELOG.md`.
 - [ ] **Open side-investigation, not blocking:** PID 238 (`ON_OFF_INPUT_PIN`) looks like it records which "Configurable Input" position is wired as a device's local switch -- well-supported by real evidence but not confirmed by documentation or a physical test. PID 146 (`INPUT_SWITCH_TYPE`)'s meaning is unknown -- no enum found in the decompiled source, no observed value variation yet. The "Configurable Inputs" bank itself (3 wired-but-uncommissioned positions) has no matching visible CAN device at all in the unconfigured pool -- genuinely unresolved.
+
+## Performance — publisher.py CPU usage
+
+- [ ] **Not yet deployed/measured on real hardware:** `ConfigManager`/`DiscoveryLog` caching, `tank_service.py`/`motor_status_service.py` D-Bus write batching, and `publisher.py`'s `StableKey`-keying cleanup (2026-08-24, see `CHANGELOG.md`) address a confirmed root cause (`publisher.py` observed at 11-12% CPU vs. 3-4% for the next-heaviest process). Deploy and confirm the CPU drop via `top`/`htop`, and re-exercise the live-reconfiguration workflow (add/expose a device via `manage-devices` while `publisher.py` keeps running) to confirm the caching fix didn't regress it.
 
 ## Not Planned (deliberate scope boundary)
 

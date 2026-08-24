@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -192,6 +193,41 @@ class ConfigManagerTests(unittest.TestCase):
         reloaded = ConfigManager(self.config_path)
         self.assertEqual(reloaded.get_or_create_bridge_identity_tail(), tail)
 
+    def test_get_devices_result_is_not_shared_mutable_state(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        devices = self.manager.get_devices()
+        devices.append({"stable_key": "bogus"})
+        devices[0]["friendly_name"] = "Tampered"
+        # A fresh call must be unaffected by mutating the previous result --
+        # regression test for ConfigManager._snapshot().
+        fresh = self.manager.get_devices()
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(fresh[0]["friendly_name"], "Kitchen Light")
+
+    def test_external_process_write_is_visible_without_a_restart(self):
+        # Simulates manage-devices/manage-system: a second ConfigManager
+        # instance, on the same path, writing while the first instance
+        # (standing in for publisher.py) keeps running. This is the
+        # concrete regression test for the property this whole caching
+        # design is built to preserve -- see ARCHITECTURE.md.
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=False)
+        self.assertFalse(self.manager.is_exposed(LIGHT_KEY))
+
+        other_process = ConfigManager(self.config_path)
+        other_process.set_expose(LIGHT_KEY, True)
+
+        self.assertTrue(self.manager.is_exposed(LIGHT_KEY))
+
+    def test_read_does_not_reload_when_file_unchanged(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        with patch.object(
+            self.manager, "_read_unlocked", wraps=self.manager._read_unlocked
+        ) as wrapped:
+            self.manager.read()
+            self.manager.read()
+            self.manager.is_exposed(LIGHT_KEY)
+            self.assertEqual(wrapped.call_count, 0)
+
 
 class DiscoveryLogTests(unittest.TestCase):
     def setUp(self):
@@ -223,6 +259,24 @@ class DiscoveryLogTests(unittest.TestCase):
 
     def test_entries_empty_when_no_file(self):
         self.assertEqual(self.log.entries(), {})
+
+    def test_external_process_write_is_visible_without_a_restart(self):
+        # manage-devices calls prune_configured() from a separate process
+        # while publisher.py's own DiscoveryLog instance keeps running.
+        self.log.record(LIGHT_KEY, "DIMMABLE_LIGHT", "UNKNOWN_49")
+        self.assertIn(LIGHT_KEY.to_config_string(), self.log.entries())
+
+        other_process = DiscoveryLog(self.path)
+        other_process.prune_configured({LIGHT_KEY.to_config_string()})
+
+        self.assertNotIn(LIGHT_KEY.to_config_string(), self.log.entries())
+
+    def test_read_does_not_reload_when_file_unchanged(self):
+        self.log.record(LIGHT_KEY, "DIMMABLE_LIGHT", "UNKNOWN_49")
+        with patch.object(self.log, "_read_unlocked", wraps=self.log._read_unlocked) as wrapped:
+            self.log.entries()
+            self.log.entries()
+            self.assertEqual(wrapped.call_count, 0)
 
 
 if __name__ == "__main__":

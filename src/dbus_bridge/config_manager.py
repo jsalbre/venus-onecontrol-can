@@ -43,6 +43,26 @@ VALID_DEVICE_CLASSES = frozenset(
 )
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Writes JSON atomically via a tempfile + os.replace() in the same
+    directory as the target, so a reader can never observe a torn/partial
+    write. Shared by ConfigManager and DiscoveryLog -- both are written
+    from more than one process (this bridge, manage-devices,
+    manage-system), so both need this, not just ConfigManager."""
+    temp_fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}_", suffix=".tmp")
+    try:
+        with os.fdopen(temp_fd, "w") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
 class ConfigManager:
     """Thread-safe, atomic-write JSON config manager (fcntl locking, adapted
     from the pattern in govee-ble-venus-py/src/config_manager.py)."""
@@ -51,6 +71,8 @@ class ConfigManager:
         self.config_path = Path(config_path)
         self.lock_path = self.config_path.with_suffix(".lock")
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache: dict | None = None
+        self._cache_key: tuple | None = None
 
     @contextmanager
     def _lock(self):
@@ -64,9 +86,48 @@ class ConfigManager:
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
                 lock_fd.close()
 
+    def _current_stat_key(self) -> tuple:
+        """(inode, mtime_ns, size) from a single stat() call -- st_ino is the
+        load-bearing part: _atomic_write() always replaces the file via a
+        fresh tempfile + os.replace(), so the inode changes on every write,
+        from any process, regardless of filesystem mtime resolution (which
+        isn't documented for the Cerbo's /data). mtime_ns/size are free
+        (same syscall) defense-in-depth, not the primary signal."""
+        try:
+            st = os.stat(self.config_path)
+            return (st.st_ino, st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            return (None, None, None)
+
+    @staticmethod
+    def _snapshot(config: dict) -> dict:
+        """Copy so a caller mutating a returned dict/list (e.g.
+        get_devices()'s list, or an individual device dict within it) can
+        never corrupt the shared in-memory cache -- load-bearing now that
+        read() can return the same cached object across multiple calls,
+        unlike before caching existed. Each device dict is copied too, not
+        just the outer list -- a shallow copy of only the list container
+        still shares the per-device dicts by reference."""
+        result = dict(config)
+        result["devices"] = [dict(device) for device in config.get("devices", [])]
+        return result
+
     def read(self) -> dict:
+        """Cached: only re-reads config.json from disk when the file has
+        actually changed (checked via a cheap stat(), not a full parse)
+        since the last read -- by this process's own writes (see
+        _write_locked()) or an external one (e.g. manage-devices/
+        manage-system editing config.json while this process keeps
+        running). This must stay correct for exactly that live-reconfig
+        case -- see ARCHITECTURE.md's config-gated-exposure design."""
+        key = self._current_stat_key()
+        if self._cache is not None and key == self._cache_key:
+            return self._snapshot(self._cache)
         with self._lock():
-            return self._read_unlocked()
+            config = self._read_unlocked()
+            self._cache = config
+            self._cache_key = self._current_stat_key()  # re-stat under lock: authoritative
+            return self._snapshot(config)
 
     def _read_unlocked(self) -> dict:
         if not self.config_path.exists():
@@ -84,20 +145,16 @@ class ConfigManager:
         return config
 
     def _atomic_write(self, config: dict) -> None:
-        temp_fd, temp_path = tempfile.mkstemp(
-            dir=self.config_path.parent, prefix=".config_", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(temp_fd, "w") as f:
-                json.dump(config, f, indent=2, sort_keys=True)
-                f.write("\n")
-            os.replace(temp_path, self.config_path)
-        except Exception:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-            raise
+        _atomic_write_json(self.config_path, config)
+
+    def _write_locked(self, config: dict) -> None:
+        """Persists atomically, then immediately refreshes the in-memory
+        cache from this same write, so this process sees its own change
+        without waiting on the next read()'s stat() check. Call only while
+        holding self._lock()."""
+        self._atomic_write(config)
+        self._cache = config
+        self._cache_key = self._current_stat_key()
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         return self.read().get(key, default)
@@ -152,7 +209,7 @@ class ConfigManager:
                 if device.get("stable_key") == target:
                     device["group"] = group
                     config["devices"] = devices
-                    self._atomic_write(config)
+                    self._write_locked(config)
                     return
             raise KeyError(f"stable_key not found in config: {target}")
 
@@ -173,7 +230,7 @@ class ConfigManager:
                 if device.get("stable_key") == target:
                     device["device_instance"] = instance
                     config["devices"] = devices
-                    self._atomic_write(config)
+                    self._write_locked(config)
                     return
             raise KeyError(f"stable_key not found in config: {target}")
 
@@ -231,7 +288,7 @@ class ConfigManager:
                 )
 
             config["devices"] = devices
-            self._atomic_write(config)
+            self._write_locked(config)
 
     def remove_device(self, stable_key: StableKey) -> None:
         target = stable_key.to_config_string()
@@ -241,7 +298,7 @@ class ConfigManager:
             new_devices = [d for d in devices if d.get("stable_key") != target]
             if len(new_devices) < len(devices):
                 config["devices"] = new_devices
-                self._atomic_write(config)
+                self._write_locked(config)
 
     def set_expose(self, stable_key: StableKey, expose: bool) -> None:
         """The explicit enable/disable operation a CLI tool would call --
@@ -254,7 +311,7 @@ class ConfigManager:
                 if device.get("stable_key") == target:
                     device["expose"] = expose
                     config["devices"] = devices
-                    self._atomic_write(config)
+                    self._write_locked(config)
                     return
             raise KeyError(f"stable_key not found in config: {target}")
 
@@ -271,7 +328,7 @@ class ConfigManager:
                 if device.get("stable_key") == target:
                     device["commands_enabled"] = commands_enabled
                     config["devices"] = devices
-                    self._atomic_write(config)
+                    self._write_locked(config)
                     return
             raise KeyError(f"stable_key not found in config: {target}")
 
@@ -290,7 +347,7 @@ class ConfigManager:
                 return bytes.fromhex(existing)
             tail = os.urandom(BRIDGE_IDENTITY_TAIL_LENGTH)
             config["bridge_identity_tail"] = tail.hex()
-            self._atomic_write(config)
+            self._write_locked(config)
             return tail
 
     def update_friendly_name(self, stable_key: StableKey, friendly_name: str) -> None:
@@ -302,7 +359,7 @@ class ConfigManager:
                 if device.get("stable_key") == target:
                     device["friendly_name"] = friendly_name
                     config["devices"] = devices
-                    self._atomic_write(config)
+                    self._write_locked(config)
                     return
             raise KeyError(f"stable_key not found in config: {target}")
 
@@ -311,13 +368,35 @@ class DiscoveryLog:
     """Records stable_keys seen on the bus but not present in config, purely
     for the user's review (e.g. via a future CLI tool). Never causes
     exposure by itself -- exposure only ever comes from ConfigManager.
-    Best-effort, not locked/atomic -- informational only, single writer."""
+    Informational only, but genuinely written from more than one process
+    (this bridge's own record(), and manage-devices' prune_configured()) --
+    written atomically (see _atomic_write_json()) and cached the same way
+    as ConfigManager, so an external process's write is still picked up
+    without a restart, same requirement as ConfigManager's cache."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache: dict | None = None
+        self._cache_key: tuple | None = None
+
+    def _current_stat_key(self) -> tuple:
+        try:
+            st = os.stat(self.path)
+            return (st.st_ino, st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            return (None, None, None)
 
     def _read(self) -> dict:
+        key = self._current_stat_key()
+        if self._cache is not None and key == self._cache_key:
+            return dict(self._cache)
+        data = self._read_unlocked()
+        self._cache = data
+        self._cache_key = self._current_stat_key()
+        return dict(data)
+
+    def _read_unlocked(self) -> dict:
         if not self.path.exists():
             return {}
         try:
@@ -328,10 +407,12 @@ class DiscoveryLog:
 
     def _write(self, data: dict) -> None:
         try:
-            with open(self.path, "w") as f:
-                json.dump(data, f, indent=2, sort_keys=True)
+            _atomic_write_json(self.path, data)
         except OSError as e:
             _LOGGER.warning("Could not write discovery log: %s", e)
+            return
+        self._cache = data
+        self._cache_key = self._current_stat_key()
 
     def record(self, stable_key: StableKey, device_type_label: str, function_name_label: str) -> None:
         data = self._read()

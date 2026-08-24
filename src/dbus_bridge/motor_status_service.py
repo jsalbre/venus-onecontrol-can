@@ -100,13 +100,13 @@ class MotorStatusService:
         )
 
     def update(self, status: RelayOrMotorStatus) -> None:
-        self._dbusservice["/MotorState"] = int(status.output_state)
-        self._dbusservice["/PositionPercent"] = status.position_pct
-        self._dbusservice["/CurrentAmps"] = status.current_draw_amps
-        self._dbusservice["/FaultLatch"] = 1 if status.fault_latch else 0
-        self._dbusservice["/Dtc"] = status.dtc
-        if self._dbusservice["/Connected"] != CONNECTED:
-            self._dbusservice["/Connected"] = CONNECTED
+        with self._dbusservice as s:
+            s["/MotorState"] = int(status.output_state)
+            s["/PositionPercent"] = status.position_pct
+            s["/CurrentAmps"] = status.current_draw_amps
+            s["/FaultLatch"] = 1 if status.fault_latch else 0
+            s["/Dtc"] = status.dtc
+            s["/Connected"] = CONNECTED
         self.last_update_time = time.time()
 
     def mark_disconnected(self) -> None:
