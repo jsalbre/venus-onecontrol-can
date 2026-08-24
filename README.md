@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.2 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-22
+**Version:** 0.5.3 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-24
 
 ---
 
@@ -18,7 +18,7 @@ Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN
 
 - Phase 0 (wiring + capture) and Phase 1 (decoder validation) are done, confirmed against real traffic from this coach.
 - Phase 2 (D-Bus publishing) is deployed and confirmed working on the real Cerbo: tank and water pump switch services registered on D-Bus, values update live, and the read-only safety gate is confirmed live (a GUI write attempt was correctly rejected and logged, not silently accepted or actually applied).
-- Phase 3 (commands) is implemented and unit tested (275 tests passing) but **not yet deployed or exercised on real hardware** — see `TODO.md`'s Phase 3 section for the exact rollout steps still needed before enabling commands on the real coach.
+- Phase 3 (commands) is implemented, unit tested (312 tests passing), and **confirmed working on real hardware** (on/off, brightness slider, panel sort/group, self-healing CAN interface bring-up) — see `TODO.md`'s Phase 3 section for the one remaining rollout item (a real power-loss test).
 
 See `TODO.md` for the detailed phase checklist.
 
@@ -57,10 +57,10 @@ python3 src/tools/candump_replay.py samples/<capture>.log
 
 ## Installation (Cerbo GX)
 
-Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). No public GitHub repo exists yet (planned for later -- see TODO.md), so deploy by copying the project directly as a tarball, excluding `config.json` (your real on-device config -- never overwrite it with the repo's), `dev-notes/`, `samples/`, and `tests/`:
+Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). No public GitHub repo exists yet (planned for later -- see TODO.md), so deploy by copying the project directly as a tarball, excluding `config.json` (your real on-device config -- never overwrite it with the repo's), `samples/`, and `tests/`:
 
 ```bash
-tar czf /tmp/venus-onecontrol-can.tar.gz --exclude='.git' --exclude='dev-notes' --exclude='samples' --exclude='tests' --exclude='__pycache__' --exclude='config.json' .
+tar czf /tmp/venus-onecontrol-can.tar.gz --exclude='.git' --exclude='samples' --exclude='tests' --exclude='__pycache__' --exclude='config.json' .
 scp /tmp/venus-onecontrol-can.tar.gz root@<cerbo-host>:/tmp/
 ```
 
@@ -99,4 +99,4 @@ Its first menu shows a numbered list of addable devices (already-configured devi
 
 Devices using the `(PRODUCT_ID, instance)` fallback key (unconfigured/unnamed inputs — see `ARCHITECTURE.md`'s stable-key design decision) are never offered, since multiple physical (non-)devices share that exact fallback identity and there's no single reliable device to enable there.
 
-Choose `M) Manage existing devices` from that same first menu to rename a device, toggle its `expose`/`commands_enabled` flags, or remove it entirely (`device_class` still isn't editable there, for the same reason it's never asked at add time). Toggling `commands_enabled` takes effect immediately; toggling `expose` off or removing a device doesn't retract it from D-Bus until the service restarts — the tool's end-of-run restart prompt covers this the same way it always has for adding a device.
+Choose `M) Manage existing devices` from that same first menu to rename a device, toggle its `expose`/`commands_enabled` flags, or remove it entirely (`device_class` still isn't editable there, for the same reason it's never asked at add time). The tool offers to restart the service after any change, but only some of them actually need one: toggling `commands_enabled` takes effect immediately, and so does adding/exposing a new device (the running service creates its D-Bus object live, the next time that device's `DEVICE_ID` broadcast arrives). Toggling `expose` off or removing a device is the one case that genuinely needs the restart — there's no live teardown path, so it stays on D-Bus until the service restarts.

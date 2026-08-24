@@ -30,8 +30,12 @@ PID 161 is a genuine configuration CHOICE (dimmer vs. plain on/off), not a
 bug to fix -- this tool presents it as such in both directions. See
 ARCHITECTURE.md's "PID Reconfiguration" design decision.
 
-Runs fine off the Cerbo for the config.json-touching parts (no dbus/gi
-dependency); the actual PID reads/writes need the real CAN bus.
+Unlike manage-devices, this does NOT run off the Cerbo at all: main() opens
+a real SocketCanBus and claims a CAN address before any flow runs, so even
+the config.json-only parts (e.g. picking an already-configured target) are
+unreachable without the real CAN interface. Only the underlying imports
+(dbus_bridge.config_manager/device_mapping) are themselves dbus/gi-free,
+which is not the same as this tool being usable off-Cerbo.
 """
 
 from __future__ import annotations

@@ -32,12 +32,22 @@ reliable device to enable).
 
 Note on what takes effect live vs. needs a restart: toggling
 commands_enabled takes effect immediately (command_gate.py reads config
-fresh from disk on every command attempt). Toggling expose off, or removing
-a device entirely, does NOT retract it from D-Bus until the service
-restarts -- publisher.py only ever creates a device's D-Bus service, never
-tears one down in response to a config change. This tool's end-of-run
-restart prompt covers all of these the same way it always has for adding a
-device.
+fresh from disk on every command attempt). Adding a device (expose=true)
+also takes effect live -- publisher.py's _handle_device_id() re-evaluates
+routing against the freshly-read config on every DEVICE_ID broadcast
+(~1/sec), so a newly-exposed device gets its D-Bus service created within
+about a second, no restart needed. Renaming a device or changing its GUI
+group, by contrast, DOES need a restart even though nothing above suggests
+it should -- friendly_name/initial_group are only read once, at the moment
+_create_service() runs, and baked into that service object; there's no
+live path to push a later config edit back into an already-created
+service. Toggling expose off, or removing a device entirely, also needs a
+restart, for a related reason: publisher.py only ever creates a device's
+D-Bus service, never tears one down in response to a config change. This
+tool's end-of-run restart prompt fires on any change regardless of which
+of these it actually was, which is harmless (a restart is never wrong,
+just occasionally unnecessary) -- it hasn't been narrowed to only the
+cases that need it.
 
 Runs fine off the Cerbo for review (no dbus/gi dependency) -- only the
 final "restart the service" step needs to run on the actual device.

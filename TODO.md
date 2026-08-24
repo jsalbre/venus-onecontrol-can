@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 3.4 | **Updated:** 2026-08-24
+**Version:** 3.5 | **Updated:** 2026-08-24
 
 ---
 
@@ -36,7 +36,6 @@ Two real goals: (1) assign a name/function to a currently-unused Unity module in
 - [x] **Relay-blip physical confirmation done (2026-08-22):** `relay_blip.py` run for real against both DIMM/LATCH output 7 and output 8 -- both confirmed correct against the `device_instance`-based candidate mapping. Also caught and fixed a real bug in the tool itself (default hold matched the session timeout exactly, briefly leaving output 7 stuck on).
 - [x] **`manage-system` built (2026-08-22):** interactive tool for module-level reconfiguration -- configure a port (identity + applicable known settings like PID 161), unconfigure a port, or back up every port's current settings. Distinct from `manage-devices` (D-Bus config only). Reused/extended `probe_common.py` with shared session-open/close, test-blip, and board-scan helpers (also refactored into `pid_write.py`/`relay_blip.py`/`list_unconfigured.py`, behavior-preserving). Full test suite green (312 tests).
 - [x] **First real-hardware run (2026-08-23) failed, root cause found and fixed (2026-08-24), confirmed working end-to-end (2026-08-24):** renaming DIMM/LATCH output 7 (PID 4/5 writes) both failed against real hardware. Root cause: `build_pid_write_request()` sized the value at each PID's own declared `Formatter` width (2 bytes for PID 4, 1 for PID 5) instead of the real, universal 6-byte (`UInt48`) width every PID write actually requires -- confirmed by reading the decompiled LippertConnect `WritePidAsync`/`PAYLOAD.FromArgs` source directly, not guessed. Fixed and retried the same day: output 7 renamed to "Front Cap Light," both writes verified `PASS`, physically tested, added to `config.json`, and now live/controllable in the OneControl app. Closes out the original "assign a name to an unused port" goal. See `ARCHITECTURE.md`'s "PID Writes" section and `CHANGELOG.md`.
-- [ ] **Deliberately still out of scope:** no automatic/production write path in `publisher.py`/`command_gate.py` -- `manage-system` remains a manual, deliberately-run tool, matching `pid_write.py`/`relay_blip.py` precedent. A separate planning pass if/when that's wanted.
 - [ ] **Open side-investigation, not blocking:** PID 238 (`ON_OFF_INPUT_PIN`) looks like it records which "Configurable Input" position is wired as a device's local switch -- well-supported by real evidence but not confirmed by documentation or a physical test. PID 146 (`INPUT_SWITCH_TYPE`)'s meaning is unknown -- no enum found in the decompiled source, no observed value variation yet. The "Configurable Inputs" bank itself (3 wired-but-uncommissioned positions) has no matching visible CAN device at all in the unconfigured pool -- genuinely unresolved.
 
 ## Not Planned (deliberate scope boundary)
