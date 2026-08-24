@@ -394,24 +394,53 @@ PID_READ_WRITE (0x11), reading:
 
 PID_READ_WRITE (0x11), writing:
   Same request code, distinguished purely by a longer payload: [PID(2, BE),
-  value bytes...]. This is the part that took us two attempts to get right:
-  a write's value must be sent at the PID's FULL declared type width, not
-  whatever truncated width a read happens to return. We first tried writing
-  a 1-byte value (matching what a read of that PID returned) and got
-  RESPONSE.BAD_REQUEST back. Retrying with the PID's full nominal width (6
-  bytes, since its declared type was a 48-bit unsigned int) succeeded. The
-  BAD_REQUEST (not a session/auth error code) was the tell that the *shape*
-  of our request was wrong, not our authorization to make it.
+  value bytes...]. THE VALUE IS ALWAYS EXACTLY 6 BYTES (a 48-bit unsigned
+  int), for every PID, full stop -- not the PID's own declared type width,
+  and not whatever truncated width a read happens to return for it. This
+  isn't inferred from limited evidence: the decompiled LippertConnect app's
+  own write method (PidClient.WritePidAsync) takes its value parameter
+  typed as UInt48 unconditionally, for every call site with no per-PID
+  branching, and its payload builder (PAYLOAD.FromArgs) packs each argument
+  by its C# runtime type -- UInt48 always serializes to 6 bytes. The PID's
+  own declared "Formatter" type (e.g. UINT16, UINT8, UINT48) governs only
+  how the app displays that value, never how wide a write actually is.
+
+  We got this wrong twice before finding the real explanation above, and
+  both mistakes are worth knowing about if you're implementing this
+  yourself:
+    - Our first real write (PID 161, a PID whose own declared type happens
+      to BE UINT48) used a 1-byte value matching what a read returned, and
+      got RESPONSE.BAD_REQUEST. Retrying at 6 bytes succeeded -- but
+      because 161's declared type is coincidentally also 6 bytes, this
+      looked like "match the PID's declared width," which is a DIFFERENT,
+      WRONG conclusion from the real one (always 6 bytes, unconditionally).
+    - We didn't catch the difference until writing PID 4 (FUNCTION_NAME,
+      declared UINT16) and PID 5 (FUNCTION_INSTANCE, declared UINT8) at
+      THEIR OWN declared widths (2 bytes, 1 byte) -- both failed. PID 4's
+      write got a reply shaped exactly like a normal successful read (see
+      below), but a read-back afterward showed the value never actually
+      changed -- a raw candump capture confirmed the device's reply was
+      byte-identical to it just echoing the unwritten current value, not a
+      real acknowledgment. PID 5's write got an explicit, distinct
+      RESPONSE.BAD_REQUEST instead (a single raw byte, see below) -- and
+      trying a nonzero value there got the identical BAD_REQUEST too, ruling
+      out "0 is special" as an explanation. Both are the same root cause
+      (wrong value width) manifesting two different ways.
 
   A confirmed real successful write reply looks exactly like a normal
   successful read reply -- [PID(2, BE), value bytes...], DLC-truncated the
   same way. No separate "write acknowledged" format; the device just
-  replies as if you'd read the (now-updated) value.
+  replies as if you'd read the (now-updated) value. IMPORTANT: this means a
+  reply that LOOKS like success (echoes the PID correctly) is not on its
+  own proof the write took effect -- always read the value back afterward
+  and compare, as our PID 4 story above shows directly.
 
   A confirmed real BAD_REQUEST write error reply was just a single raw
   byte (the RESPONSE code alone) -- notably shorter than the 5-byte read
-  error shape above. We've only observed this one error case for a write;
-  other write error codes may have different shapes, unconfirmed.
+  error shape above. The decompiled app's own response-matching code also
+  recognizes a third, 7-byte error shape ([0x0000][echoed PID(2)]
+  [RESPONSE(1)] plus 2 trailing bytes of unknown meaning) that we haven't
+  seen on real hardware ourselves.
 
   Writing (at least some) PIDs requires a session first -- and not
   necessarily REMOTE_CONTROL. See section 7's SESSION_ID table; the PIDs
@@ -503,10 +532,13 @@ documented in the official Configurator Guide (its "DEVICE NAME" section,
 shown there being used on a device the touchscreen displays as "UNKNOWN").
 That's PID 4 (FUNCTION_NAME) and PID 5 (FUNCTION_INSTANCE) -- the same two
 fields that show up in every DEVICE_ID broadcast (section 3). Both are also
-DIAGNOSTIC-session-gated per the decompiled catalog; we haven't personally
-exercised a real write of these two yet (only PID 161 so far), but we're
-confident in the mechanism given everything else above about DIAGNOSTIC
-writes has checked out.
+DIAGNOSTIC-session-gated per the decompiled catalog. We DID try a real
+write of both, and both initially failed -- this is exactly the story in
+section 10 above (we used each PID's own declared width, 2 bytes and 1
+byte, instead of the real universal 6-byte width). Root cause found and
+fixed; haven't re-verified the actual rename against real hardware yet
+with the fix in place, so treat identity writes as "mechanism understood,
+re-confirmation pending," not yet as fully proven as PID 161 above.
 
 We don't have any way to validate further reconfiguration PIDs without
 guessing -- our installation has no physical touchscreen (the only official

@@ -6,7 +6,7 @@ transmitted onto the bus at all.
 Frame formats below are NOT sourced from community documentation -- they
 were decoded directly from a real OneControl power-cycle/reconnect capture
 (samples/poweroutage_capture.log, gitignored) after community docs turned
-out not to cover address claiming at all. See dev-notes/ARCHITECTURE.md for
+out not to cover address claiming at all. See ARCHITECTURE.md for
 the full analysis. Confirmed from that capture:
 
 - Claim frame: standard (11-bit) CAN ID 0x000, 8-byte payload

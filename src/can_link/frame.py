@@ -1,7 +1,7 @@
 """CAN ID encode/decode for the IDS-CAN protocol.
 
 Confirmed byte-exact against the decompiled Lippert `IDS.Core.IDS_CAN.CAN_ID`
-struct (see dev-notes/ARCHITECTURE.md). Two ID widths share the bus:
+struct (see ARCHITECTURE.md). Two ID widths share the bus:
 
 - Standard 11-bit: broadcasts (DEVICE_ID, DEVICE_STATUS, TIME, ...)
 - Extended 29-bit: point-to-point (REQUEST, RESPONSE, COMMAND, ...)

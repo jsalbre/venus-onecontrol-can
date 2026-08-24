@@ -7,9 +7,9 @@ user can watch a multimeter connected to that terminal -- the same
 throughout this project, just live instead of via a log.
 
 Sends a real COMMAND frame (relay ON, held briefly, then relay OFF) to a
-raw CAN address, over a REMOTE_CONTROL session -- the same session type
-and command builder (can_link.command.build_relay_command) already used
-for every real Phase 3 relay command, just targeted directly at an address
+raw CAN address, over a REMOTE_CONTROL session -- via
+tools.probe_common.send_test_blip(), shared with manage-system's own
+post-configure test step (2026-08-22). Targets a raw address directly
 rather than going through the config-gated production safety path
 (command_gate.py), since an unconfigured device has no device_class or
 commands_enabled flag to gate on. This tool has real physical effect
@@ -23,7 +23,7 @@ on the wire during the hold itself -- a hold that reaches the timeout means
 the OFF command arrives after the device has already closed the session, so
 it's silently ignored and the relay stays on. Confirmed for real on real
 hardware (2026-08-22): the original 5.0s default did exactly this. Capped
-at MAX_HOLD_SECONDS accordingly.
+at MAX_HOLD_SECONDS (probe_common.MAX_TEST_HOLD_SECONDS) accordingly.
 
 Usage:
     python3 relay_blip.py --address 0x11
@@ -38,75 +38,22 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bus.socketcan import SocketCanBus
-from can_link.command import RelayCommandMode, build_relay_command
-from can_link.session import (
-    REQUEST_CODE_SESSION_END,
-    REQUEST_CODE_SESSION_REQUEST_SEED,
-    REQUEST_CODE_SESSION_TRANSMIT_KEY,
-    SessionClient,
-    SessionError,
-)
 from tools.probe_common import (
     DEFAULT_INTERFACE,
     DEFAULT_RESPONSE_TIMEOUT_SEC,
+    DEFAULT_TEST_HOLD_SECONDS,
+    MAX_TEST_HOLD_SECONDS,
+    SessionOpenError,
     claim_bridge_address,
-    send_request,
-    wait_for_response,
+    send_test_blip,
 )
 
-DEFAULT_HOLD_SECONDS = 2.0
-MAX_HOLD_SECONDS = 4.0  # session auto-expires after 5s of silence (session.py SESSION_TIMEOUT_SEC) -- leaves margin for handshake round-trip time already elapsed before the hold starts
-
-
-class BlipAborted(Exception):
-    """Raised when the session handshake fails or times out."""
-
-
-def _send_command_frame(bus: SocketCanBus, frame) -> None:
-    bus.send(frame)
-
-
-def perform_blip(bus: SocketCanBus, source: int, target: int, hold_seconds: float, timeout_sec: float) -> None:
-    session = SessionClient()  # default session_id=REMOTE_CONTROL -- real-hardware-proven
-    try:
-        seed_payload = session.request_seed(time.time())
-        send_request(bus, source, target, REQUEST_CODE_SESSION_REQUEST_SEED, seed_payload)
-        seed_reply = wait_for_response(bus, source, target, REQUEST_CODE_SESSION_REQUEST_SEED, timeout_sec)
-        if seed_reply is None:
-            raise BlipAborted("no response to SESSION_REQUEST_SEED -- is this address currently live?")
-        print(f"  SESSION_REQUEST_SEED reply: raw={seed_reply.hex()}")
-        try:
-            key_payload = session.handle_seed_response(seed_reply, time.time())
-        except (SessionError, ValueError) as e:
-            raise BlipAborted(f"SESSION_REQUEST_SEED reply rejected: {e}") from e
-
-        send_request(bus, source, target, REQUEST_CODE_SESSION_TRANSMIT_KEY, key_payload)
-        key_reply = wait_for_response(bus, source, target, REQUEST_CODE_SESSION_TRANSMIT_KEY, timeout_sec)
-        if key_reply is None:
-            raise BlipAborted("no response to SESSION_TRANSMIT_KEY")
-        print(f"  SESSION_TRANSMIT_KEY reply: raw={key_reply.hex()}")
-        try:
-            session.handle_key_response(time.time())
-        except SessionError as e:
-            raise BlipAborted(f"SESSION_TRANSMIT_KEY reply rejected: {e}") from e
-
-        print("  Session open. Sending relay ON -- check your multimeter now.")
-        _send_command_frame(bus, build_relay_command(source, target, RelayCommandMode.ON))
-        session.note_activity(time.time())
-
-        print(f"  Holding ON for {hold_seconds:.0f}s...")
-        time.sleep(hold_seconds)
-
-        print("  Sending relay OFF.")
-        _send_command_frame(bus, build_relay_command(source, target, RelayCommandMode.OFF))
-    finally:
-        end_payload = session.session_end(time.time())
-        send_request(bus, source, target, REQUEST_CODE_SESSION_END, end_payload)
+DEFAULT_HOLD_SECONDS = DEFAULT_TEST_HOLD_SECONDS
+MAX_HOLD_SECONDS = MAX_TEST_HOLD_SECONDS
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,8 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nClaimed bridge address 0x{bridge_address:02X}")
 
         try:
-            perform_blip(bus, bridge_address, args.address, args.hold_seconds, args.response_timeout)
-        except BlipAborted as e:
+            send_test_blip(bus, bridge_address, args.address, None, args.hold_seconds, args.response_timeout)
+        except SessionOpenError as e:
             print(f"Blip aborted: {e}")
             return 1
 

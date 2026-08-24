@@ -3,7 +3,7 @@
 Two separate builders, deliberately not unified into one parameterized
 function: relay commands and dimmable light commands use incompatible
 payload shapes, and conflating them was the single biggest bug the source
-community research hit (see dev-notes/ARCHITECTURE.md). Relay commands
+community research hit (see ARCHITECTURE.md). Relay commands
 carry their command in the CAN ID's message-data byte with a MANDATORY
 EMPTY payload; any payload bytes cause the device to silently discard the
 command. Dimmable light commands carry an 8-byte payload with the

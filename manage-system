@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""Interactive tool to reconfigure the OneControl/Unity module itself --
+writing PIDs over a DIAGNOSTIC session -- as opposed to manage-devices,
+which only ever touches this bridge's own D-Bus exposure config
+(config.json). Built 2026-08-22 once the underlying mechanisms were all
+proven on real hardware: PID 4/5 (identity) writes, PID 161 (dimming vs.
+latching behavior), and device_instance-based target disambiguation
+(list_unconfigured.py + relay_blip.py's physical confirmation).
+
+Real, physical-effect writes to real hardware, with no config-gated safety
+net (an unconfigured device has no device_class/commands_enabled to gate
+on -- same as pid_write.py/relay_blip.py). Every run opens with a warning
+requiring explicit typed acknowledgment before anything else happens.
+
+Three real operations, matching what's actually been proven -- not a
+generic "write any PID" editor (pid_write.py already covers that):
+
+  1) Configure a port -- identity (PID 4/5) and/or any applicable known
+     setting (currently just PID 161's dimming-vs-latching behavior,
+     can_link.pid_client.KNOWN_SETTINGS), for either a never-configured
+     port or an already-configured device. Includes an optional physical
+     test step before deciding whether to add a newly-named device to
+     config.json.
+  2) Unconfigure a port -- reverts identity to FUNCTION_NAME=0/
+     FUNCTION_INSTANCE=0.
+  3) Back up current settings of every port on the bus -- read-only,
+     writes a timestamped snapshot to samples/.
+
+PID 161 is a genuine configuration CHOICE (dimmer vs. plain on/off), not a
+bug to fix -- this tool presents it as such in both directions. See
+ARCHITECTURE.md's "PID Reconfiguration" design decision.
+
+Runs fine off the Cerbo for the config.json-touching parts (no dbus/gi
+dependency); the actual PID reads/writes need the real CAN bus.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+from bus.socketcan import SocketCanBus
+from can_link.pid_client import (
+    KNOWN_SETTINGS,
+    PID_IDS_CAN_FUNCTION_INSTANCE,
+    PID_IDS_CAN_FUNCTION_NAME,
+    PID_READ_REQUEST_CODE,
+    RESPONSE_CODE_NAMES,
+    ConfigurableSetting,
+    build_pid_read_request,
+    build_pid_write_request,
+    parse_pid_reply,
+)
+from can_link.session import SESSION_ID_DIAGNOSTIC
+from can_link.types import DeviceType, StableKey, function_name_label, search_function_names
+from dbus_bridge.config_manager import ConfigManager
+from dbus_bridge.device_mapping import infer_device_class
+from tools.probe_common import (
+    DEFAULT_INTERFACE,
+    DEFAULT_LISTEN_TIMEOUT_SEC,
+    DEFAULT_RESPONSE_TIMEOUT_SEC,
+    DEFAULT_TEST_HOLD_SECONDS,
+    SessionOpenError,
+    claim_bridge_address,
+    close_session,
+    open_session,
+    resolve_target_identity,
+    scan_board,
+    send_request,
+    send_test_blip,
+    wait_for_response,
+)
+
+DEFAULT_CONFIG_PATH = Path("/data/venus-onecontrol-can/config.json")
+SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
+CONFIRM_PHRASE = "i understand"
+
+
+def prompt_yes_no(question: str, default_yes: bool = True) -> bool:
+    suffix = "(Y/n)" if default_yes else "(y/N)"
+    answer = input(f"{question} {suffix}: ").strip().lower()
+    if not answer:
+        return default_yes
+    return answer.startswith("y")
+
+
+def show_startup_warning() -> bool:
+    print("=" * 60)
+    print("  WARNING -- manage-system writes directly to real hardware")
+    print("=" * 60)
+    print()
+    print("  This tool reconfigures the OneControl/Unity module itself,")
+    print("  not just this bridge's own D-Bus config. There is no")
+    print("  config-gated safety net here -- improper use (wrong target,")
+    print("  wrong setting) can affect a live system you rely on, including")
+    print("  the water pump, water heater, or lights, and there is no")
+    print("  touchscreen on this installation to revert a bad write through")
+    print("  official tooling.")
+    print()
+    answer = input(f'  Type "{CONFIRM_PHRASE}" to continue: ').strip().lower()
+    print()
+    return answer == CONFIRM_PHRASE
+
+
+def read_pid_value(bus: SocketCanBus, source: int, target: int, pid: int, timeout_sec: float) -> int | None:
+    """Returns the PID's current raw value, or None if unsupported
+    (RESPONSE.UNKNOWN_ID or any other error shape) or no response at all."""
+    send_request(bus, source, target, PID_READ_REQUEST_CODE, build_pid_read_request(pid))
+    reply = wait_for_response(bus, source, target, PID_READ_REQUEST_CODE, timeout_sec)
+    if reply is None:
+        return None
+    try:
+        parsed = parse_pid_reply(reply)
+    except ValueError:
+        return None
+    if parsed.pid != pid:
+        return None  # echoed a different PID -- the confirmed error-reply shape, not a real value
+    return parsed.raw_value
+
+
+def write_pid_verified(bus: SocketCanBus, source: int, target: int, pid: int, value: int, timeout_sec: float) -> bool:
+    """Reads the PID's pre-write value, opens a DIAGNOSTIC session, writes
+    it, closes the session, then reads back to verify -- the same pattern
+    pid_write.py already proved. Reading before writing lets FAIL
+    distinguish "write had no effect" (still reads its pre-write value)
+    from "changed to something unanticipated" (reads neither the
+    pre-write nor the requested value) -- caught for real 2026-08-23: a
+    write that looked like RESPONSE.SUCCESS but silently had no effect was
+    indistinguishable from a real success until this was added.
+
+    No value_byte_count parameter: build_pid_write_request()'s default (6
+    bytes / UInt48) is confirmed the universal real wire width for every
+    PID write, not a per-PID choice -- see its docstring and
+    ARCHITECTURE.md. Using PID 4/5's own declared Formatter widths (2/1
+    bytes) instead of 6 is what caused two real write failures on real
+    hardware, 2026-08-23 (PID 4 silently had no effect, PID 5 got
+    RESPONSE.BAD_REQUEST).
+
+    Returns True only if the read-back matches the requested value."""
+    pre_value = read_pid_value(bus, source, target, pid, timeout_sec)
+    session = open_session(bus, source, target, SESSION_ID_DIAGNOSTIC, timeout_sec)
+    write_rejected = False
+    try:
+        write_payload = build_pid_write_request(pid, value)
+        send_request(bus, source, target, PID_READ_REQUEST_CODE, write_payload)
+        write_reply = wait_for_response(bus, source, target, PID_READ_REQUEST_CODE, timeout_sec)
+        if write_reply is None:
+            print(f"    WRITE PID {pid}: no response to write request")
+        elif write_reply:
+            name = RESPONSE_CODE_NAMES.get(write_reply[-1])
+            if name and name != "SUCCESS":
+                print(f"    WRITE PID {pid}: raw={write_reply.hex()} (RESPONSE.{name})")
+                write_rejected = True
+    finally:
+        close_session(bus, source, target, session)
+
+    readback = read_pid_value(bus, source, target, pid, timeout_sec)
+    # A read-back match is not proof of success on its own -- if the device
+    # explicitly rejected the write (e.g. RESPONSE.BAD_REQUEST) and the
+    # target value happened to equal the value already there, the read-back
+    # matches by coincidence, not because the write took effect. Caught for
+    # real on 2026-08-22: a FUNCTION_INSTANCE=0 write got BAD_REQUEST but
+    # still read back 0 (its pre-existing value) and was wrongly reported
+    # PASS.
+    if not write_rejected and readback == value:
+        print(f"    PASS: PID {pid} now reads {readback}")
+        return True
+    if readback == pre_value:
+        print(f"    FAIL: PID {pid} unchanged -- still reads {readback!r} (its pre-write value), wanted {value}")
+    else:
+        print(
+            f"    FAIL: PID {pid} reads {readback!r} -- neither the requested value ({value}) nor its "
+            f"pre-write value ({pre_value!r}) -- changed to something unanticipated, investigate before trusting it"
+        )
+    return False
+
+
+def applicable_settings(device_type: DeviceType | None) -> list[ConfigurableSetting]:
+    if device_type is None:
+        return []
+    return [s for s in KNOWN_SETTINGS if device_type in s.applies_to]
+
+
+def browse_and_pick(matches: list[tuple[int, str]], page_size: int = 50, columns: int = 2) -> int | None:
+    """Paginated, multi-column browser over (value, name) pairs -- e.g. all
+    446 FUNCTION_NAMEs when the user wants to browse rather than search.
+    Numbering is absolute across all pages (not reset per page), so a
+    remembered number always picks the same item regardless of how many
+    times the user pages back and forth. Column-major layout (fills down
+    the first column before starting the second) keeps each column
+    alphabetically contiguous, matching search_function_names()'s sort."""
+    page = 0
+    total_pages = max(1, (len(matches) + page_size - 1) // page_size)
+    while True:
+        start = page * page_size
+        page_items = matches[start : start + page_size]
+        rows = (len(page_items) + columns - 1) // columns
+        print(f"\n  Page {page + 1}/{total_pages} ({len(matches)} total):")
+        for row in range(rows):
+            cells = []
+            for col in range(columns):
+                idx = row + col * rows
+                if idx < len(page_items):
+                    value, name = page_items[idx]
+                    abs_num = start + idx + 1
+                    cells.append(f"{abs_num:4d}) {name} ({value})".ljust(38))
+            print("  " + "".join(cells))
+
+        nav = []
+        if page > 0:
+            nav.append("P) Previous page")
+        if page < total_pages - 1:
+            nav.append("N) Next page")
+        nav.append("Q) Cancel")
+        print("\n  " + "   ".join(nav))
+        choice = input("Pick a number, or a page-navigation letter: ").strip().lower()
+        if choice == "n" and page < total_pages - 1:
+            page += 1
+            continue
+        if choice == "p" and page > 0:
+            page -= 1
+            continue
+        if choice == "q" or not choice:
+            return None
+        try:
+            abs_num = int(choice)
+            if not (1 <= abs_num <= len(matches)):
+                raise ValueError
+        except ValueError:
+            print("Invalid selection.")
+            continue
+        return matches[abs_num - 1][0]
+
+
+# ---------------------------------------------------------------------------
+# Target resolution
+# ---------------------------------------------------------------------------
+
+
+def pick_reference_key(config: ConfigManager) -> StableKey | None:
+    devices = config.get_devices()
+    return StableKey.from_config_string(devices[0]["stable_key"]) if devices else None
+
+
+def pick_unconfigured_target(bus: SocketCanBus, config: ConfigManager, listen_timeout: float) -> tuple[int, DeviceType | None] | None:
+    reference_key = pick_reference_key(config)
+    if reference_key is None:
+        print("No configured devices yet to use as a board reference -- listening for all unconfigured devices.")
+        reference_key = StableKey("product_id", 0, 0)  # will simply never match anything real
+
+    print(f"Listening up to {listen_timeout:.0f}s for DEVICE_ID broadcasts...")
+    result = scan_board(bus, reference_key, listen_timeout)
+
+    if result.reference_product is not None:
+        matches = {
+            addr: identity
+            for addr, identity in result.unconfigured.items()
+            if (identity.product_id, identity.product_instance) == result.reference_product
+        }
+    else:
+        matches = result.unconfigured
+
+    if not matches:
+        print("No unconfigured devices seen in this window.")
+        return _prompt_raw_address()
+
+    print("\nUnconfigured devices:")
+    ordered = sorted(matches.items())
+    for i, (addr, identity) in enumerate(ordered, start=1):
+        device_type = identity.device_type
+        type_label = device_type.name if device_type else f"UNKNOWN({identity.device_type_raw})"
+        print(f"  {i}) addr=0x{addr:02X}  device_type={type_label}  device_instance={identity.device_instance}")
+    print("  A) Enter a raw address directly")
+    print("  Q) Cancel")
+    choice = input("Select a target: ").strip().lower()
+    if choice == "a":
+        return _prompt_raw_address()
+    if not choice or choice == "q":
+        return None
+    try:
+        index = int(choice)
+        if not (1 <= index <= len(ordered)):
+            raise ValueError
+    except ValueError:
+        print("Invalid selection.")
+        return None
+    addr, identity = ordered[index - 1]
+    return addr, identity.device_type
+
+
+def _prompt_raw_address() -> tuple[int, DeviceType | None] | None:
+    raw = input("Raw CAN address (e.g. 0x11), or blank to cancel: ").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw, 0), None
+    except ValueError:
+        print("Invalid address.")
+        return None
+
+
+def pick_configured_target(
+    bus: SocketCanBus, config: ConfigManager, listen_timeout: float
+) -> tuple[int, DeviceType | None, dict | None] | None:
+    devices = config.get_devices()
+    if devices:
+        print("\nConfigured devices:")
+        for i, d in enumerate(devices, start=1):
+            print(f"  {i}) {d.get('friendly_name', '(unnamed)')}  [{d.get('device_class', '?')}]  {d['stable_key']}")
+    else:
+        print("\nNo configured devices yet.")
+    print("  A) Enter a raw address directly")
+    print("  Q) Cancel")
+    choice = input("Select a target: ").strip().lower()
+    if choice == "a":
+        result = _prompt_raw_address()
+        return (result[0], result[1], None) if result else None
+    if not choice or choice == "q":
+        return None
+    try:
+        index = int(choice)
+        if not (1 <= index <= len(devices)):
+            raise ValueError
+    except ValueError:
+        print("Invalid selection.")
+        return None
+
+    device = devices[index - 1]
+    target_key = StableKey.from_config_string(device["stable_key"])
+    resolved = resolve_target_identity(bus, target_key, listen_timeout)
+    if resolved is None:
+        print(f"Timed out waiting for a DEVICE_ID broadcast matching {device['stable_key']}")
+        return None
+    addr, identity = resolved
+    return addr, identity.device_type, device
+
+
+# ---------------------------------------------------------------------------
+# Flow 1: Configure a port
+# ---------------------------------------------------------------------------
+
+
+def flow_configure(bus: SocketCanBus, source: int, config: ConfigManager, listen_timeout: float, timeout_sec: float) -> None:
+    print()
+    print("=" * 44)
+    print("  Configure a Port")
+    print("=" * 44)
+    print()
+    print("  1) An unconfigured port")
+    print("  2) An already-configured device")
+    print("  Q) Back")
+    choice = input("Which? ").strip().lower()
+    if choice == "1":
+        picked = pick_unconfigured_target(bus, config, listen_timeout)
+        existing_config_entry = None
+    elif choice == "2":
+        picked3 = pick_configured_target(bus, config, listen_timeout)
+        if picked3 is None:
+            return
+        picked = (picked3[0], picked3[1])
+        existing_config_entry = picked3[2]
+    else:
+        return
+    if picked is None:
+        return
+
+    _configure_target(bus, source, picked[0], picked[1], config, existing_config_entry, timeout_sec)
+
+
+def _configure_target(
+    bus: SocketCanBus,
+    source: int,
+    target: int,
+    device_type: DeviceType | None,
+    config: ConfigManager,
+    existing_config_entry: dict | None,
+    timeout_sec: float,
+) -> None:
+    any_changes_applied = False
+    while True:
+        type_label = device_type.name if device_type else "unknown (raw address, no DEVICE_ID seen)"
+        print()
+        print("=" * 44)
+        print(f"  Target: 0x{target:02X}  (DEVICE_TYPE: {type_label})")
+        print("=" * 44)
+
+        current_name_pid = read_pid_value(bus, source, target, PID_IDS_CAN_FUNCTION_NAME, timeout_sec)
+        current_instance_pid = read_pid_value(bus, source, target, PID_IDS_CAN_FUNCTION_INSTANCE, timeout_sec)
+        current_name_label = function_name_label(current_name_pid) if current_name_pid is not None else "?"
+        print(f"  Current identity: {current_name_label} (FUNCTION_NAME={current_name_pid}, instance={current_instance_pid})")
+
+        settings = applicable_settings(device_type)
+        current_setting_values: dict[int, int | None] = {}
+        for setting in settings:
+            value = read_pid_value(bus, source, target, setting.pid, timeout_sec)
+            current_setting_values[setting.pid] = value
+            if value is None:
+                print(f"  {setting.name}: not supported on this device")
+            else:
+                print(f"  {setting.name} = {value}  ({setting.description})")
+
+        print()
+        print("  1) Change identity (name/instance)")
+        for i, setting in enumerate(settings, start=2):
+            if current_setting_values.get(setting.pid) is not None:
+                print(f"  {i}) Change {setting.name}")
+        print("  Q) Done / back")
+        choice = input("What do you want to change? ").strip().lower()
+
+        pending: list[tuple[int, int, str]] = []  # (pid, value, label)
+
+        if choice == "1":
+            query = input("Search FUNCTION_NAME (part of a name, or blank to browse all 446): ").strip()
+            matches = search_function_names(query)
+            if not matches:
+                print("No matches.")
+                continue
+            new_name_pid = browse_and_pick(matches)
+            if new_name_pid is None:
+                continue
+            instance_str = input("Function instance [0]: ").strip()
+            new_instance_pid = int(instance_str) if instance_str else 0
+            pending.append((PID_IDS_CAN_FUNCTION_NAME, new_name_pid, "FUNCTION_NAME"))
+            pending.append((PID_IDS_CAN_FUNCTION_INSTANCE, new_instance_pid, "FUNCTION_INSTANCE"))
+        elif choice.isdigit() and 2 <= int(choice) < 2 + len(settings):
+            setting = settings[int(choice) - 2]
+            new_value_str = input(f"New value for {setting.name} [current: {current_setting_values[setting.pid]}]: ").strip()
+            if not new_value_str:
+                continue
+            try:
+                new_value = int(new_value_str, 0)
+            except ValueError:
+                print("Invalid value.")
+                continue
+            pending.append((setting.pid, new_value, setting.name))
+        elif choice == "q" or not choice:
+            break
+        else:
+            print("Invalid selection.")
+            continue
+
+        print("\nPending change(s):")
+        for pid, value, label in pending:
+            print(f"  Write PID {pid} ({label}) = {value}")
+        if not prompt_yes_no("Apply these change(s)?", default_yes=True):
+            continue
+
+        any_changes_applied = True
+        all_passed = True
+        for pid, value, label in pending:
+            print(f"\n  Writing {label} (PID {pid})...")
+            if not write_pid_verified(bus, source, target, pid, value, timeout_sec):
+                all_passed = False
+        if not all_passed:
+            print("\n  *** One or more writes did NOT verify -- the device may be unchanged. ***")
+            input("  Press Enter to acknowledge before continuing: ")
+
+    if not any_changes_applied:
+        print("\nNo changes made.")
+        return
+
+    _post_configure(bus, source, target, device_type, config, existing_config_entry, timeout_sec)
+
+
+def _post_configure(
+    bus: SocketCanBus,
+    source: int,
+    target: int,
+    device_type: DeviceType | None,
+    config: ConfigManager,
+    existing_config_entry: dict | None,
+    timeout_sec: float,
+) -> None:
+    tested_ok: bool | None = None
+    if prompt_yes_no("\nTest this device now?", default_yes=True):
+        hold = DEFAULT_TEST_HOLD_SECONDS
+        try:
+            send_test_blip(bus, source, target, device_type, hold, timeout_sec)
+        except SessionOpenError as e:
+            print(f"Test aborted: {e}")
+        else:
+            tested_ok = prompt_yes_no("Did it behave as expected?", default_yes=True)
+
+        if tested_ok is False:
+            print("\n  1) Try different settings")
+            print("  2) Revert identity to unconfigured (FUNCTION_NAME=0/FUNCTION_INSTANCE=0)")
+            print("  3) Leave as-is")
+            choice = input("What now? ").strip()
+            if choice == "1":
+                _configure_target(bus, source, target, device_type, config, existing_config_entry, timeout_sec)
+                return
+            if choice == "2":
+                if not prompt_yes_no("  Revert identity to unconfigured? This writes immediately.", default_yes=False):
+                    print("  Cancelled -- nothing written.")
+                    return
+                print("\n  Reverting identity...")
+                ok1 = write_pid_verified(bus, source, target, PID_IDS_CAN_FUNCTION_NAME, 0, timeout_sec)
+                ok2 = write_pid_verified(bus, source, target, PID_IDS_CAN_FUNCTION_INSTANCE, 0, timeout_sec)
+                if ok1 and ok2:
+                    print("  Reverted to unconfigured.")
+                    if existing_config_entry is not None:
+                        print(f"\n  Note: {existing_config_entry.get('friendly_name')!r} is still in config.json,")
+                        print("  but its stable_key will no longer resolve reliably now that FUNCTION_NAME=0.")
+                        if prompt_yes_no("  Remove it from config.json now?", default_yes=True):
+                            config.remove_device(StableKey.from_config_string(existing_config_entry["stable_key"]))
+                            print("  Removed from config.json.")
+                else:
+                    print("  Revert did not fully verify -- check with pid_probe.py before trusting this port's state.")
+                return
+
+    if existing_config_entry is not None:
+        print("\nThis device was already in config.json -- a settings-only change doesn't need any config.json update.")
+        return
+
+    if prompt_yes_no("\nAdd this device to config.json now?", default_yes=True):
+        name_pid = read_pid_value(bus, source, target, PID_IDS_CAN_FUNCTION_NAME, timeout_sec)
+        instance_pid = read_pid_value(bus, source, target, PID_IDS_CAN_FUNCTION_INSTANCE, timeout_sec) or 0
+        if name_pid is None or name_pid == 0:
+            print("This device doesn't have a real FUNCTION_NAME yet -- rename it first.")
+            return
+        stable_key = StableKey("function_name", name_pid, instance_pid)
+        suggested_name = function_name_label(name_pid)
+        device_class = infer_device_class(stable_key, device_type.name) if device_type else None
+        if device_class is None:
+            print(f"No supported device_class for DEVICE_TYPE={device_type} -- add manually with manage-devices if needed.")
+            return
+        friendly_name = input(f"Friendly name [{suggested_name}]: ").strip() or suggested_name
+        expose = prompt_yes_no("Expose on D-Bus now?", default_yes=True)
+        config.add_device(stable_key, friendly_name, device_class, expose=expose, commands_enabled=False)
+        print(f"Added {friendly_name!r} to config.json (device_class={device_class}). Commands disabled by default -- use manage-devices to enable.")
+
+
+# ---------------------------------------------------------------------------
+# Flow 2: Unconfigure a port
+# ---------------------------------------------------------------------------
+
+
+def flow_unconfigure(bus: SocketCanBus, source: int, config: ConfigManager, listen_timeout: float, timeout_sec: float) -> None:
+    print()
+    print("=" * 44)
+    print("  Unconfigure a Port")
+    print("=" * 44)
+    print()
+    print("  This resets a device's identity back to unconfigured")
+    print("  (FUNCTION_NAME=0, FUNCTION_INSTANCE=0). This can affect a")
+    print("  device you actually rely on -- not just a spare port.")
+    print()
+
+    # pick_configured_target already offers "enter a raw address" as an
+    # in-menu option -- None here means the user actually cancelled, not
+    # "no address was given," so respect that rather than re-prompting.
+    picked = pick_configured_target(bus, config, listen_timeout)
+    if picked is None:
+        return
+    target, device_type, existing_config_entry = picked
+
+    current_name_pid = read_pid_value(bus, source, target, PID_IDS_CAN_FUNCTION_NAME, timeout_sec)
+    current_label = function_name_label(current_name_pid) if current_name_pid is not None else "?"
+    print(f"\nTarget 0x{target:02X} currently: {current_label} (FUNCTION_NAME={current_name_pid})")
+
+    if not prompt_yes_no(f'Really unconfigure "{current_label}"?', default_yes=False):
+        print("Cancelled.")
+        return
+    if not prompt_yes_no("This cannot be undone without re-naming it manually. Confirm again?", default_yes=False):
+        print("Cancelled.")
+        return
+
+    ok1 = write_pid_verified(bus, source, target, PID_IDS_CAN_FUNCTION_NAME, 0, timeout_sec)
+    ok2 = write_pid_verified(bus, source, target, PID_IDS_CAN_FUNCTION_INSTANCE, 0, timeout_sec)
+    if not (ok1 and ok2):
+        print("Unconfigure did not fully verify -- check with pid_probe.py before trusting this port's state.")
+        return
+    print("Unconfigured.")
+
+    if existing_config_entry is not None:
+        print(f"\nNote: {existing_config_entry.get('friendly_name')!r} is still in config.json, but its stable_key")
+        print("will no longer resolve reliably now that FUNCTION_NAME=0 (falls back to the ambiguous")
+        print("product_id/instance key shared by every unconfigured port).")
+        if prompt_yes_no("Remove it from config.json now?", default_yes=True):
+            config.remove_device(StableKey.from_config_string(existing_config_entry["stable_key"]))
+            print("Removed from config.json.")
+
+
+# ---------------------------------------------------------------------------
+# Flow 3: Back up current settings of all ports
+# ---------------------------------------------------------------------------
+
+
+def flow_backup(bus: SocketCanBus, source: int, listen_timeout: float, timeout_sec: float) -> None:
+    print()
+    print("=" * 44)
+    print("  Back Up Current Settings of All Ports")
+    print("=" * 44)
+    print()
+    print("Read-only -- nothing is written.")
+    print(f"Listening up to {listen_timeout:.0f}s for DEVICE_ID broadcasts...")
+
+    result = scan_board(bus, StableKey("product_id", 0, 0), listen_timeout)
+    all_devices = result.all_devices
+
+    snapshot = []
+    for addr, identity in sorted(all_devices.items()):
+        entry = {
+            "address": f"0x{addr:02X}",
+            "product_id": identity.product_id,
+            "product_instance": identity.product_instance,
+            "device_type_raw": identity.device_type_raw,
+            "device_type": identity.device_type.name if identity.device_type else None,
+            "function_name": identity.function_name,
+            "function_name_label": function_name_label(identity.function_name),
+            "function_instance": identity.function_instance,
+            "device_instance": identity.device_instance,
+            "capabilities_raw": identity.capabilities_raw,
+            "settings": {},
+        }
+        for setting in applicable_settings(identity.device_type):
+            value = read_pid_value(bus, source, addr, setting.pid, timeout_sec)
+            entry["settings"][setting.name] = value
+        snapshot.append(entry)
+        print(f"  0x{addr:02X}  {entry['function_name_label']}  device_type={entry['device_type']}")
+
+    SAMPLES_DIR.mkdir(exist_ok=True)
+    out_path = SAMPLES_DIR / f"port_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+    out_path.write_text(json.dumps(snapshot, indent=2))
+    print(f"\nWrote {len(snapshot)} device(s) to {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main() -> int:
+    if not show_startup_warning():
+        print("Not confirmed -- exiting.")
+        return 1
+
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH
+    if not config_path.exists():
+        print(f"Error: config file not found: {config_path}")
+        return 1
+    config = ConfigManager(config_path)
+
+    interface = os.environ.get("ONECONTROL_CAN_INTERFACE", DEFAULT_INTERFACE)
+    with SocketCanBus(interface) as bus:
+        bridge_address = claim_bridge_address(bus)
+        print(f"Claimed bridge address 0x{bridge_address:02X}")
+
+        while True:
+            print()
+            print("=" * 44)
+            print("  OneControl System Configuration")
+            print("=" * 44)
+            print()
+            print("  1) Configure a port")
+            print("  2) Unconfigure a port")
+            print("  3) Back up current settings of all ports")
+            print("  Q) Quit")
+            choice = input("Choose an action: ").strip().lower()
+
+            if choice == "1":
+                flow_configure(bus, bridge_address, config, DEFAULT_LISTEN_TIMEOUT_SEC, DEFAULT_RESPONSE_TIMEOUT_SEC)
+            elif choice == "2":
+                flow_unconfigure(bus, bridge_address, config, DEFAULT_LISTEN_TIMEOUT_SEC, DEFAULT_RESPONSE_TIMEOUT_SEC)
+            elif choice == "3":
+                flow_backup(bus, bridge_address, DEFAULT_LISTEN_TIMEOUT_SEC, DEFAULT_RESPONSE_TIMEOUT_SEC)
+            elif choice == "q" or not choice:
+                break
+            else:
+                print("Invalid selection.")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

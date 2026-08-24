@@ -1,7 +1,7 @@
 """PID_READ_LIST (request code 0x10), PID_READ_WRITE (request code 0x11),
 and PID_GET_PROPERTIES (request code 0x12) request/reply handling (all
 MessageType.REQUEST). No session is required for any of these -- all three
-are read-only introspection operations. See dev-notes/ARCHITECTURE.md for
+are read-only introspection operations. See ARCHITECTURE.md for
 the PID_READ_WRITE worked example this is validated against, and for the
 real error-reply format confirmed 2026-08-21 (see RESPONSE_CODE_NAMES
 below): three real devices probed all returned RESPONSE.UNKNOWN_ID (4) for
@@ -29,6 +29,8 @@ tool, not wired into any production code path.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+
+from can_link.types import DeviceType
 
 PID_LIST_REQUEST_CODE = 0x10
 PID_READ_REQUEST_CODE = 0x11
@@ -83,6 +85,47 @@ PID_DEVICE_TYPE = 183
 # for reference/citation, not as something worth reading again without new
 # evidence they mean anything on this hardware family.
 PID_LOAD_TYPE = 451
+
+
+@dataclass(frozen=True)
+class ConfigurableSetting:
+    """A known, real, non-identity PID that governs a genuine configuration
+    choice on a device -- as opposed to PID 4/5 (identity/naming, handled
+    separately since every device supports them) or PID_DEVICE_TYPE/
+    PID_LOAD_TYPE above (confirmed NOT supported on this hardware family).
+
+    applies_to is which DeviceType(s) might plausibly support this PID --
+    a hint for deciding what to even attempt, not a guarantee. Callers
+    (manage-system) must still confirm real support per-device (a read
+    that comes back RESPONSE.UNKNOWN_ID means "not on this device," same
+    lesson as the PID_DEVICE_TYPE/PID_LOAD_TYPE dead end) before offering
+    to change it.
+
+    No value_byte_count field: writes are confirmed (2026-08-24, decompiled
+    LippertConnect WritePidAsync -- see ARCHITECTURE.md) to always send the
+    value as a 6-byte UInt48 on the wire, for every PID, regardless of its
+    own declared Formatter/display width -- not a per-setting choice."""
+
+    pid: int
+    name: str
+    applies_to: frozenset[DeviceType]
+    description: str
+
+
+# Deliberately minimal -- one real, confirmed entry, not a speculative
+# framework. Add more here as they're found and confirmed real, the same
+# way PID 161 was (see ARCHITECTURE.md's "PID Reconfiguration" design
+# decision).
+KNOWN_SETTINGS: tuple[ConfigurableSetting, ...] = (
+    ConfigurableSetting(
+        pid=161,
+        name="SIMULATE_ON_OFF_STYLE_LIGHT",
+        applies_to=frozenset({DeviceType.DIMMABLE_LIGHT}),
+        description="0 = behaves as a real dimmer, 1 = behaves as a plain on/off switch (a genuine "
+        "configuration choice, e.g. for a non-dimmable fixture wired to a dimming-capable "
+        "output -- not inherently a misconfiguration)",
+    ),
+)
 
 
 def build_pid_list_request(page: int) -> bytes:
@@ -152,15 +195,19 @@ def build_pid_properties_request(pid: int) -> bytes:
     return build_pid_read_request(pid)
 
 
-def build_pid_write_request(pid: int, value: int, value_byte_count: int = 1) -> bytes:
+def build_pid_write_request(pid: int, value: int, value_byte_count: int = 6) -> bytes:
     """Same request code as a read (PID_READ_REQUEST_CODE, 0x11) -- writes
     are distinguished purely by payload length: PID(2, BE) + value bytes,
-    vs. a read's bare PID(2, BE). Confirmed mechanics (2026-08-21,
-    decompiled LippertConnect source), not yet confirmed by a real
-    successful write -- see ARCHITECTURE.md's PID Reconfiguration design
-    decision. Requires the PID's own required session to be open first
-    (see can_link/session.py's SESSION_CYPHERS) -- not enforced here, this
-    module only builds/parses payload bytes."""
+    vs. a read's bare PID(2, BE). Default of 6 bytes (UInt48) is confirmed
+    (2026-08-24, decompiled LippertConnect WritePidAsync -- see
+    ARCHITECTURE.md) to be the real, universal wire width for every PID
+    write, regardless of the PID's own declared Formatter/display width --
+    NOT a per-PID choice, despite value_byte_count being a caller-supplied
+    parameter here (kept for the rare case a caller wants to deliberately
+    send a malformed width, e.g. to reproduce the BAD_REQUEST this
+    generated before the fix). Requires the PID's own required session to
+    be open first (see can_link/session.py's SESSION_CYPHERS) -- not
+    enforced here, this module only builds/parses payload bytes."""
     if not (0 <= pid <= 0xFFFF):
         raise ValueError(f"PID out of range: {pid}")
     if value_byte_count < 1:

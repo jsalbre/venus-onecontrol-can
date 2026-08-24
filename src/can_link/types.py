@@ -1,6 +1,6 @@
 """Shared enums and value types for the IDS-CAN protocol layer.
 
-See dev-notes/ARCHITECTURE.md for the full protocol reference these are
+See ARCHITECTURE.md for the full protocol reference these are
 transcribed from. Values are unvalidated against real hardware until
 Phase 0/1 acceptance criteria are met (see TODO.md).
 """
@@ -583,6 +583,16 @@ FUNCTION_NAMES: dict[int, str] = {
 def function_name_label(value: int) -> str:
     """Human-readable label for a FUNCTION_NAME value, for logging only."""
     return FUNCTION_NAMES.get(value, f"UNKNOWN_{value}")
+
+
+def search_function_names(query: str) -> list[tuple[int, str]]:
+    """Case-insensitive substring search against FUNCTION_NAMES, sorted by
+    name. For interactive tools (manage-system) that need to pick a
+    FUNCTION_NAME by searching rather than already knowing its numeric
+    code."""
+    query_lower = query.lower()
+    matches = [(value, name) for value, name in FUNCTION_NAMES.items() if query_lower in name.lower()]
+    return sorted(matches, key=lambda item: item[1])
 
 
 @dataclass(frozen=True)

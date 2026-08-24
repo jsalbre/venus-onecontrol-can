@@ -6,23 +6,34 @@ plain on/off latch) and 0 on a working dimmer (Kitchen Pendants Light) --
 see ARCHITECTURE.md's PID Reconfiguration design decision.
 
 UNLIKE pid_probe.py, this tool has real physical effect: it opens a
-DIAGNOSTIC session (SESSION_ID 2) and writes a PID. DIAGNOSTIC has never
-been exercised against real hardware before -- only REMOTE_CONTROL (used
-for COMMAND frames) is real-hardware-proven. There is no touchscreen on
-this installation to revert a bad write through official tooling. This is
-a deliberately separate script from pid_probe.py (which is permanently
-read-only) rather than a flag bolted onto it, on top of requiring an
-explicit --confirm flag before sending anything.
+DIAGNOSTIC session (SESSION_ID 2) and writes a PID -- real-hardware-proven
+since 2026-08-21 (this tool is what proved it, fixing the Kitchen Island
+Light dimming problem). There is no touchscreen on this installation to
+revert a bad write through official tooling (manage-system's "unconfigure"
+flow can revert a PID 4/5 identity write; other PIDs have no generic revert
+path -- know the PID's meaning before writing it). This is a deliberately
+separate script from pid_probe.py (which is permanently read-only) rather
+than a flag bolted onto it, on top of requiring an explicit --confirm flag
+before sending anything.
 
 Flow: claim a bridge CAN address -> resolve the target device's current
-address -> open a DIAGNOSTIC session (SESSION_REQUEST_SEED /
-SESSION_TRANSMIT_KEY, driven synchronously) -> send the PID write
-(PID_READ_WRITE, 0x11, distinguished from a read by payload length) and
-print the raw reply -> SESSION_END -> read the PID back (no session
-needed) and print PASS/FAIL comparing the read-back value against what was
-requested. The write reply's own success shape is unconfirmed project-wide
-(only the error shape is confirmed) -- the read-back is the real
-verification, not the write response itself.
+address -> read the PID's current value (so a later FAIL can say whether
+the write had no effect or changed something unanticipated) -> open a
+DIAGNOSTIC session (SESSION_REQUEST_SEED / SESSION_TRANSMIT_KEY, driven
+synchronously) -> send the PID write (PID_READ_WRITE, 0x11, distinguished
+from a read by payload length) and print the raw reply -> SESSION_END ->
+read the PID back (no session needed) and print PASS/FAIL comparing the
+read-back value against what was requested.
+
+--value-bytes defaults to 6 (UInt48): confirmed 2026-08-24 (decompiled
+LippertConnect WritePidAsync, see ARCHITECTURE.md) to be the real,
+universal wire width for every PID write, not something derived from the
+target PID's own declared Formatter/display width. Getting this wrong is
+what caused two real write failures on real hardware the same day (PID 4
+silently had no effect; PID 5 got RESPONSE.BAD_REQUEST) -- both used
+value-bytes matching the PID's declared width (2, 1) instead of the real
+required width (6). The flag still exists to deliberately send a
+different width for diagnostic purposes.
 
 Usage:
     python3 pid_write.py --stable-key "function_name=38,function_instance=0" \\
@@ -38,7 +49,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -50,28 +60,34 @@ from can_link.pid_client import (
     build_pid_write_request,
     parse_pid_reply,
 )
-from can_link.session import (
-    REQUEST_CODE_SESSION_END,
-    REQUEST_CODE_SESSION_REQUEST_SEED,
-    REQUEST_CODE_SESSION_TRANSMIT_KEY,
-    SESSION_ID_DIAGNOSTIC,
-    SessionClient,
-    SessionError,
-)
+from can_link.session import SESSION_ID_DIAGNOSTIC
 from can_link.types import StableKey
 from tools.probe_common import (
     DEFAULT_INTERFACE,
     DEFAULT_LISTEN_TIMEOUT_SEC,
     DEFAULT_RESPONSE_TIMEOUT_SEC,
+    SessionOpenError,
     claim_bridge_address,
+    close_session,
+    open_session,
     resolve_target_address,
     send_request,
     wait_for_response,
 )
 
 
-class WriteAborted(Exception):
-    """Raised when a handshake step fails or times out."""
+def _read_pid(bus: SocketCanBus, source: int, target: int, pid: int, timeout_sec: float) -> int | None:
+    send_request(bus, source, target, PID_READ_REQUEST_CODE, build_pid_read_request(pid))
+    reply = wait_for_response(bus, source, target, PID_READ_REQUEST_CODE, timeout_sec)
+    if reply is None:
+        return None
+    try:
+        parsed = parse_pid_reply(reply)
+    except ValueError:
+        return None
+    if parsed.pid != pid:
+        return None
+    return parsed.raw_value
 
 
 def perform_write(
@@ -83,29 +99,12 @@ def perform_write(
     value_byte_count: int,
     timeout_sec: float,
 ) -> None:
-    session = SessionClient(session_id=SESSION_ID_DIAGNOSTIC)
+    print("  Reading current value before writing...")
+    pre_value = _read_pid(bus, source, target, pid, timeout_sec)
+    print(f"  PID {pid} before write: {pre_value!r}")
+
+    session = open_session(bus, source, target, SESSION_ID_DIAGNOSTIC, timeout_sec)
     try:
-        seed_payload = session.request_seed(time.time())
-        send_request(bus, source, target, REQUEST_CODE_SESSION_REQUEST_SEED, seed_payload)
-        seed_reply = wait_for_response(bus, source, target, REQUEST_CODE_SESSION_REQUEST_SEED, timeout_sec)
-        if seed_reply is None:
-            raise WriteAborted("no response to SESSION_REQUEST_SEED")
-        print(f"  SESSION_REQUEST_SEED reply: raw={seed_reply.hex()}")
-        try:
-            key_payload = session.handle_seed_response(seed_reply, time.time())
-        except (SessionError, ValueError) as e:
-            raise WriteAborted(f"SESSION_REQUEST_SEED reply rejected: {e}") from e
-
-        send_request(bus, source, target, REQUEST_CODE_SESSION_TRANSMIT_KEY, key_payload)
-        key_reply = wait_for_response(bus, source, target, REQUEST_CODE_SESSION_TRANSMIT_KEY, timeout_sec)
-        if key_reply is None:
-            raise WriteAborted("no response to SESSION_TRANSMIT_KEY")
-        print(f"  SESSION_TRANSMIT_KEY reply: raw={key_reply.hex()}")
-        try:
-            session.handle_key_response(time.time())
-        except SessionError as e:
-            raise WriteAborted(f"SESSION_TRANSMIT_KEY reply rejected: {e}") from e
-
         print(f"  DIAGNOSTIC session open. Writing PID {pid} = {value} ({value_byte_count} byte(s))...")
         write_payload = build_pid_write_request(pid, value, value_byte_count)
         send_request(bus, source, target, PID_READ_REQUEST_CODE, write_payload)
@@ -119,8 +118,7 @@ def perform_write(
                 if name:
                     print(f"        last byte (0x{write_reply[-1]:02X}) matches RESPONSE.{name}")
     finally:
-        end_payload = session.session_end(time.time())
-        send_request(bus, source, target, REQUEST_CODE_SESSION_END, end_payload)
+        close_session(bus, source, target, session)
 
     print("  Reading PID back to verify (no session needed)...")
     send_request(bus, source, target, PID_READ_REQUEST_CODE, build_pid_read_request(pid))
@@ -136,10 +134,16 @@ def perform_write(
         return
     if reply.pid == pid and reply.raw_value == value:
         print(f"  PASS: PID {pid} now reads {reply.raw_value} (matches requested value)")
+    elif reply.pid == pid and reply.raw_value == pre_value:
+        print(
+            f"  FAIL: PID {pid} unchanged -- still reads {reply.raw_value} (its pre-write value), "
+            f"write had no effect (wanted {value})"
+        )
     else:
         print(
-            f"  FAIL: PID {pid} read back echoed_pid={reply.pid} raw_value={reply.raw_value} "
-            f"-- does not match requested value {value}"
+            f"  FAIL: PID {pid} read back echoed_pid={reply.pid} raw_value={reply.raw_value} -- "
+            f"does not match requested value {value}, and differs from its pre-write value {pre_value!r} too "
+            f"-- changed to something unanticipated, investigate before trusting this PID's state"
         )
 
 
@@ -151,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     target_group.add_argument("--address", type=lambda s: int(s, 0), help="raw current CAN address, e.g. 0x1D")
     parser.add_argument("--pid", type=lambda s: int(s, 0), required=True, help="PID to write")
     parser.add_argument("--value", type=lambda s: int(s, 0), required=True, help="value to write")
-    parser.add_argument("--value-bytes", type=int, default=1, help="width of the value in bytes (default: 1)")
+    parser.add_argument("--value-bytes", type=int, default=6, help="width of the value in bytes (default: 6, UInt48 -- the confirmed real wire width)")
     parser.add_argument(
         "--confirm", action="store_true", help="actually send the write -- without this, only prints the plan"
     )
@@ -168,9 +172,9 @@ def main(argv: list[str] | None = None) -> int:
 
     target_desc = args.stable_key if args.stable_key else f"0x{args.address:02X}"
     print(f"Plan: write PID {args.pid} = {args.value} ({args.value_bytes} byte(s)) to {target_desc}")
-    print("This writes to real device configuration over a DIAGNOSTIC session that has never been")
-    print("validated against real hardware before. There is no touchscreen on this installation to")
-    print("revert a bad write through official tooling.")
+    print("This writes to real device configuration. There is no touchscreen on this installation")
+    print("to revert a bad write through official tooling, and no config-gated safety net here --")
+    print("know what this PID means before writing it.")
     if not args.confirm:
         print("\nNo write sent -- re-run with --confirm to actually perform it.")
         return 0
@@ -193,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             perform_write(
                 bus, bridge_address, target_address, args.pid, args.value, args.value_bytes, args.response_timeout
             )
-        except WriteAborted as e:
+        except SessionOpenError as e:
             print(f"Write aborted: {e}")
             return 1
 

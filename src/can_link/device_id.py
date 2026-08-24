@@ -1,5 +1,5 @@
 """DEVICE_ID broadcast payload decoding (MessageType.DEVICE_ID, 11-bit ID
-0x200 | source_address, ~1Hz). See dev-notes/ARCHITECTURE.md for the byte
+0x200 | source_address, ~1Hz). See ARCHITECTURE.md for the byte
 layout this is transcribed from.
 
 Decodes only the 8-byte payload -- the sender's CAN SourceAddress comes from

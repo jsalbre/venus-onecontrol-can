@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from can_link.types import DeviceType, StableKey, function_name_label
+from can_link.types import DeviceType, StableKey, function_name_label, search_function_names
 
 
 class StableKeyTests(unittest.TestCase):
@@ -54,6 +54,36 @@ class FunctionNameLabelTests(unittest.TestCase):
 
     def test_unknown_value_returns_placeholder(self):
         self.assertEqual(function_name_label(9999), "UNKNOWN_9999")
+
+
+class SearchFunctionNamesTests(unittest.TestCase):
+    def test_exact_name_matches(self):
+        results = search_function_names("Kitchen Island Light")
+        self.assertIn((38, "Kitchen Island Light"), results)
+
+    def test_case_insensitive(self):
+        results = search_function_names("kitchen island light")
+        self.assertIn((38, "Kitchen Island Light"), results)
+
+    def test_substring_matches_multiple_real_entries(self):
+        # Both Leveler codes are real, distinct vendor entries -- see
+        # FunctionNameLabelTests.
+        results = search_function_names("Leveler")
+        codes = {value for value, _ in results}
+        self.assertIn(109, codes)
+        self.assertIn(142, codes)
+
+    def test_results_sorted_by_name(self):
+        results = search_function_names("Tank")
+        names = [name for _, name in results]
+        self.assertEqual(names, sorted(names))
+
+    def test_no_match_returns_empty_list(self):
+        self.assertEqual(search_function_names("not a real function name at all"), [])
+
+    def test_empty_query_matches_everything(self):
+        results = search_function_names("")
+        self.assertGreater(len(results), 400)  # full table is 446 entries
 
 
 class DeviceTypeTests(unittest.TestCase):

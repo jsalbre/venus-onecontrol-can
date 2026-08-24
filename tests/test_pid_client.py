@@ -31,14 +31,19 @@ class BuildPidReadRequestTests(unittest.TestCase):
 
 class BuildPidWriteRequestTests(unittest.TestCase):
     def test_matches_real_pid_161_write_shape(self):
-        # PID 161 (SIMULATE_ON_OFF_STYLE_LIGHT), value=0, 1 byte -- the
-        # real write this project's pid_write.py tool sends. Confirmed
-        # real read width (2026-08-21): the confirmed real reply for this
-        # PID is 1 byte, matching this default.
-        self.assertEqual(build_pid_write_request(161, 0, 1), bytes([0x00, 0xA1, 0x00]))
+        # PID 161 (SIMULATE_ON_OFF_STYLE_LIGHT), value=0, 6 bytes -- the
+        # real write that succeeded on real hardware (2026-08-21). A first
+        # attempt at 1 byte (matching what a *read* returns) got
+        # RESPONSE.BAD_REQUEST; 6 bytes (UInt48) is what actually worked --
+        # confirmed 2026-08-24 (decompiled LippertConnect WritePidAsync,
+        # see ARCHITECTURE.md) to be the universal write width for every
+        # PID, not something specific to 161's own declared Formatter.
+        self.assertEqual(build_pid_write_request(161, 0, 6), bytes([0x00, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
 
-    def test_default_value_byte_count_is_one(self):
-        self.assertEqual(build_pid_write_request(161, 1), bytes([0x00, 0xA1, 0x01]))
+    def test_default_value_byte_count_is_six(self):
+        self.assertEqual(
+            build_pid_write_request(161, 1), bytes([0x00, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
+        )
 
     def test_multi_byte_value(self):
         self.assertEqual(build_pid_write_request(4, 0x1234, 2), bytes([0x00, 0x04, 0x12, 0x34]))

@@ -2,7 +2,7 @@
 type uses the same tea_transform()-shaped algorithm with its own cypher
 constant -- see SESSION_CYPHERS). SESSION_ID 4 ("REMOTE_CONTROL") is
 required before any COMMAND frame is honored and is this module's default.
-See dev-notes/ARCHITECTURE.md.
+See ARCHITECTURE.md.
 
 CONFIRMED against real hardware: 8 independent seed/key pairs captured from
 this coach's actual OneControl bus (2026-08-19, see
@@ -38,7 +38,7 @@ REQUEST_CODE_SESSION_REQUEST_SEED = 0x42  # 66
 REQUEST_CODE_SESSION_TRANSMIT_KEY = 0x43  # 67
 REQUEST_CODE_SESSION_END = 0x45  # 69
 
-# Full catalog per decompiled `SESSION_ID` class (dev-notes/ARCHITECTURE.md).
+# Full catalog per decompiled `SESSION_ID` class (ARCHITECTURE.md).
 # Only DIAGNOSTIC (2) and REMOTE_CONTROL (4) are used by this project;
 # REMOTE_CONTROL is real-hardware-proven (8 captured handshakes), the rest
 # are decompiled-only and unconfirmed against real traffic.

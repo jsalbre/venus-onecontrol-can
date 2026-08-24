@@ -4,7 +4,7 @@
 Interpretation depends on the sender's DeviceType (known from that address's
 prior DEVICE_ID broadcast, not from this payload) -- callers must dispatch
 via decode_status(device_type, payload) rather than guessing from payload
-shape alone. See dev-notes/ARCHITECTURE.md for the byte layouts.
+shape alone. See ARCHITECTURE.md for the byte layouts.
 """
 
 from __future__ import annotations

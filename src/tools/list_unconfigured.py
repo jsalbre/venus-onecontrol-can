@@ -19,6 +19,9 @@ used anywhere else in this project) rather than guessed.
 Sends NOTHING on the bus -- doesn't even claim a CAN address, unlike
 pid_probe.py/pid_write.py. Strictly read-only, zero risk.
 
+Its scanning logic (tools.probe_common.scan_board()) is shared with
+manage-system's own target-discovery step (2026-08-22).
+
 Usage:
     python3 list_unconfigured.py --reference-stable-key "function_name=38,function_instance=0"
 
@@ -31,29 +34,14 @@ from __future__ import annotations
 
 import argparse
 import os
-import select
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bus.socketcan import SocketCanBus
-from can_link.device_id import DeviceIdentity, decode_device_id, stable_key
-from can_link.frame import StandardId, decode_id
-from can_link.types import MessageType, StableKey
-
-DEFAULT_INTERFACE = "vecan1"
-DEFAULT_LISTEN_TIMEOUT_SEC = 20.0
-
-
-def _recv_with_timeout(bus: SocketCanBus, timeout_sec: float):
-    if timeout_sec <= 0:
-        return None
-    ready, _, _ = select.select([bus.fileno()], [], [], timeout_sec)
-    if not ready:
-        return None
-    frame = bus.recv()
-    return frame.can_id, frame.is_extended, frame.data
+from can_link.device_id import DeviceIdentity
+from can_link.types import StableKey
+from tools.probe_common import DEFAULT_INTERFACE, DEFAULT_LISTEN_TIMEOUT_SEC, scan_board
 
 
 def _print_identity(label: str, addr: int, identity: DeviceIdentity) -> None:
@@ -84,62 +72,38 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     reference_key = StableKey.from_config_string(args.reference_stable_key)
-    compare_keys = [StableKey.from_config_string(k) for k in args.compare_key]
+    compare_keys = tuple(StableKey.from_config_string(k) for k in args.compare_key)
 
-    reference_product: tuple[int, int] | None = None
-    compare_resolved: dict[StableKey, tuple[int, DeviceIdentity]] = {}
-    seen: dict[int, DeviceIdentity] = {}
-
+    print(f"Listening up to {args.listen_timeout:.0f}s for DEVICE_ID broadcasts...")
     with SocketCanBus(args.interface) as bus:
-        print(f"Listening up to {args.listen_timeout:.0f}s for DEVICE_ID broadcasts...")
-        deadline = time.time() + args.listen_timeout
-        while time.time() < deadline:
-            result = _recv_with_timeout(bus, deadline - time.time())
-            if result is None:
-                continue
-            can_id, is_extended, data = result
-            if is_extended:
-                continue
-            decoded = decode_id(can_id, is_extended)
-            assert isinstance(decoded, StandardId)
-            if decoded.message_type != MessageType.DEVICE_ID:
-                continue
-            try:
-                identity = decode_device_id(data)
-            except ValueError:
-                continue
+        result = scan_board(bus, reference_key, args.listen_timeout, compare_keys)
 
-            key = stable_key(identity)
-
-            if key == reference_key and reference_product is None:
-                reference_product = (identity.product_id, identity.product_instance)
-                print(
-                    f"Reference device resolved: addr=0x{decoded.source_address:02X} "
-                    f"product_id={identity.product_id} product_instance={identity.product_instance}"
-                )
-
-            if key in compare_keys and key not in compare_resolved:
-                compare_resolved[key] = (decoded.source_address, identity)
-
-            if identity.function_name == 0:
-                seen[decoded.source_address] = identity
+    if result.reference_product is not None:
+        print(
+            f"Reference device resolved: addr=0x{result.reference_address:02X} "
+            f"product_id={result.reference_product[0]} product_instance={result.reference_product[1]}"
+        )
 
     if compare_keys:
         print("\nKnown/named devices (for device_instance comparison):")
         for key in compare_keys:
-            if key in compare_resolved:
-                addr, identity = compare_resolved[key]
+            if key in result.compare_resolved:
+                addr, identity = result.compare_resolved[key]
                 _print_identity(key.to_config_string(), addr, identity)
             else:
                 print(f"  {key.to_config_string():<12} never seen in this window")
 
-    if reference_product is None:
+    if result.reference_product is None:
         print(f"\nNever saw a DEVICE_ID broadcast matching {args.reference_stable_key} -- can't filter by board.")
         print("Unconfigured devices seen (all, unfiltered):")
-        matches = list(seen.items())
+        matches = list(result.unconfigured.items())
     else:
         print(f"\nUnconfigured (FUNCTION_NAME=0) devices on the same board as {args.reference_stable_key}:")
-        matches = [(addr, identity) for addr, identity in seen.items() if (identity.product_id, identity.product_instance) == reference_product]
+        matches = [
+            (addr, identity)
+            for addr, identity in result.unconfigured.items()
+            if (identity.product_id, identity.product_instance) == result.reference_product
+        ]
 
     if not matches:
         print("  (none seen in this window)")
