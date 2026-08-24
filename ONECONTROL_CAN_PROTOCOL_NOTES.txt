@@ -497,7 +497,7 @@ it's in a decompiled catalog with a promising-sounding name -- confirm it's
 actually supported on your specific hardware via PID_READ_LIST first.
 
 
-11. THE ONE RECONFIGURATION WE'VE ACTUALLY CONFIRMED WORKING
+11. RECONFIGURATIONS WE'VE ACTUALLY CONFIRMED WORKING
 -----------------------------------------------------------------
 Concrete problem we had: one of our board's dimming-capable outputs (driving
 a light fixture) behaved as a plain on/off latch -- any dim-level command
@@ -536,9 +536,13 @@ DIAGNOSTIC-session-gated per the decompiled catalog. We DID try a real
 write of both, and both initially failed -- this is exactly the story in
 section 10 above (we used each PID's own declared width, 2 bytes and 1
 byte, instead of the real universal 6-byte width). Root cause found and
-fixed; haven't re-verified the actual rename against real hardware yet
-with the fix in place, so treat identity writes as "mechanism understood,
-re-confirmation pending," not yet as fully proven as PID 161 above.
+fixed, and confirmed working the next day: retried against the same real
+target at the corrected 6-byte width, both writes verified by read-back,
+the device behaved correctly on a physical test, and the official
+OneControl app itself now shows and controls it under its new name. So
+this is now just as fully confirmed as PID 161 above -- identity
+reassignment via PID 4/5 is a real, working reconfiguration path, not
+just a plausible mechanism.
 
 We don't have any way to validate further reconfiguration PIDs without
 guessing -- our installation has no physical touchscreen (the only official
