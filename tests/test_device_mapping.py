@@ -29,7 +29,6 @@ class ServiceKindForTests(unittest.TestCase):
         self.assertEqual(service_kind_for("dimmable_light"), "switch")
         self.assertEqual(service_kind_for("relay_pump"), "switch")
         self.assertEqual(service_kind_for("relay_water_heater"), "switch")
-        self.assertEqual(service_kind_for("motor_status"), "motor_status")
 
     def test_unknown_device_class_returns_none(self):
         self.assertIsNone(service_kind_for("bogus"))
@@ -74,10 +73,6 @@ class ValidateDeviceClassTests(unittest.TestCase):
                 with self.subTest(device_class=device_class, motor_type=motor_type):
                     self.assertFalse(validate_device_class(device_class, motor_type))
 
-    def test_motor_status_matches_only_motor_types(self):
-        self.assertTrue(validate_device_class("motor_status", DeviceType.MOMENTARY_H_BRIDGE_TYPE_2))
-        self.assertFalse(validate_device_class("motor_status", DeviceType.LATCHING_RELAY_TYPE_2))
-
     def test_none_observed_type_never_validates(self):
         self.assertFalse(validate_device_class("tank", None))
         self.assertFalse(validate_device_class("relay_light", None))
@@ -93,6 +88,18 @@ class OutputTypeAndFunctionTests(unittest.TestCase):
     def test_relay_classes_get_toggle_output_type(self):
         for device_class in ("relay_light", "relay_pump", "relay_water_heater"):
             self.assertEqual(output_type_for(device_class), OutputType.TOGGLE)
+
+    def test_dimmable_light_not_dimming_capable_gets_toggle_output_type(self):
+        # PID 161 (SIMULATE_ON_OFF_STYLE_LIGHT) confirmed the device behaves
+        # as a plain on/off switch -- see ARCHITECTURE.md's "PID 161 Live
+        # Read" note. device_class stays "dimmable_light" (protocol-correct
+        # for command building); only the D-Bus presentation changes.
+        self.assertEqual(output_type_for("dimmable_light", dimming_capable=False), OutputType.TOGGLE)
+
+    def test_relay_classes_ignore_dimming_capable(self):
+        # dimming_capable is only ever consulted for "dimmable_light".
+        for device_class in ("relay_light", "relay_pump", "relay_water_heater"):
+            self.assertEqual(output_type_for(device_class, dimming_capable=False), OutputType.TOGGLE)
 
     def test_relay_pump_gets_tank_pump_function(self):
         self.assertEqual(output_function_for("relay_pump"), OutputFunction.TANK_PUMP)
@@ -239,7 +246,11 @@ class InferDeviceClassTests(unittest.TestCase):
         key = StableKey("function_name", 38, 0)
         self.assertEqual(infer_device_class(key, "DIMMABLE_LIGHT"), "dimmable_light")
 
-    def test_all_motor_types_map_to_motor_status(self):
+    def test_all_motor_types_are_unsupported(self):
+        # Motor status support was removed 2026-08-24 (see ARCHITECTURE.md's
+        # "Motor Status Support -- Removed" note) -- a motor DeviceType is
+        # now unsupported the same as any other unrecognized one, not
+        # mapped to a "motor_status" device_class anymore.
         key = StableKey("function_name", 105, 1)
         for label in (
             "LATCHING_H_BRIDGE",
@@ -248,7 +259,7 @@ class InferDeviceClassTests(unittest.TestCase):
             "MOMENTARY_H_BRIDGE_TYPE_2",
         ):
             with self.subTest(label=label):
-                self.assertEqual(infer_device_class(key, label), "motor_status")
+                self.assertIsNone(infer_device_class(key, label))
 
     def test_water_pump_relay(self):
         key = StableKey("function_name", 5, 0)  # Water Pump
@@ -333,9 +344,9 @@ class BuildAddableListTests(unittest.TestCase):
 
     def test_appends_instance_number_when_nonzero(self):
         # Matches Lippert's own app display convention (f"{name} {instance}").
-        discovered = {"function_name=105,function_instance=1": {"device_type": "MOMENTARY_H_BRIDGE_TYPE_2", "function_name": "Awning"}}
+        discovered = {"function_name=49,function_instance=1": {"device_type": "DIMMABLE_LIGHT", "function_name": "Awning Light"}}
         result = build_addable_list(discovered, already_configured=set())
-        self.assertEqual(result[0].suggested_friendly_name, "Awning 1")
+        self.assertEqual(result[0].suggested_friendly_name, "Awning Light 1")
 
     def test_real_discovery_log_from_actual_hardware(self):
         # Verbatim discovered_devices.json from the 2026-08-20 deployment.
@@ -359,15 +370,20 @@ class BuildAddableListTests(unittest.TestCase):
         result = build_addable_list(discovered, already_configured=set())
         by_key = {d.stable_key.to_config_string(): d for d in result}
 
-        # 4 excluded (3 product_id-fallback + 1 unsupported RAW type), 11 remain.
-        self.assertEqual(len(result), 11)
+        # 8 excluded (3 product_id-fallback + 1 unsupported RAW type + 4
+        # motor devices -- 2 Awnings + 2 Slides, all MOMENTARY_H_BRIDGE_TYPE_2,
+        # unsupported since motor status support was removed 2026-08-24),
+        # 7 remain.
+        self.assertEqual(len(result), 7)
         self.assertNotIn("product_id=184,instance=1", by_key)
         self.assertNotIn("product_id=185,instance=249", by_key)
         self.assertNotIn("product_id=232,instance=42", by_key)
         self.assertNotIn("function_name=353,function_instance=0", by_key)
+        self.assertNotIn("function_name=105,function_instance=1", by_key)
+        self.assertNotIn("function_name=105,function_instance=2", by_key)
+        self.assertNotIn("function_name=96,function_instance=1", by_key)
+        self.assertNotIn("function_name=96,function_instance=2", by_key)
 
-        self.assertEqual(by_key["function_name=105,function_instance=1"].device_class, "motor_status")
-        self.assertEqual(by_key["function_name=105,function_instance=1"].suggested_friendly_name, "Awning 1")
         self.assertEqual(by_key["function_name=270,function_instance=0"].device_class, "relay_light")
         self.assertEqual(by_key["function_name=38,function_instance=0"].device_class, "dimmable_light")
 

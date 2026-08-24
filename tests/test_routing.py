@@ -114,16 +114,6 @@ class RouteDeviceIdTests(unittest.TestCase):
         routing = route_device_id(key, identity, self.config, already_created=False)
         self.assertEqual(routing.action, DeviceIdAction.CLASS_MISMATCH)
 
-    def test_motor_correctly_configured_as_motor_status(self):
-        identity = _motor_identity()
-        from can_link.device_id import stable_key
-
-        key = stable_key(identity)
-        self.config.add_device(key, "Awning", "motor_status", expose=True)
-        routing = route_device_id(key, identity, self.config, already_created=False)
-        self.assertEqual(routing.action, DeviceIdAction.CREATE_SERVICE)
-        self.assertEqual(routing.service_kind, "motor_status")
-
     def test_expose_false_is_never_created(self):
         identity = _tank_identity()
         from can_link.device_id import stable_key
@@ -137,9 +127,6 @@ class RouteDeviceIdTests(unittest.TestCase):
 class StatusUpdateMethodForTests(unittest.TestCase):
     def test_tank(self):
         self.assertEqual(status_update_method_for("tank", "tank"), "update")
-
-    def test_motor_status(self):
-        self.assertEqual(status_update_method_for("motor_status", "motor_status"), "update")
 
     def test_switch_relay_light(self):
         self.assertEqual(status_update_method_for("switch", "relay_light"), "update_relay")

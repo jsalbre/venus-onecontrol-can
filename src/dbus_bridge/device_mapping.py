@@ -18,7 +18,6 @@ from enum import IntEnum
 
 from can_link.types import (
     COMMANDABLE_DEVICE_TYPES,
-    MOTOR_DEVICE_TYPES,
     DeviceType,
     StableKey,
     function_name_label,
@@ -58,7 +57,6 @@ DEVICE_CLASS_EXPECTED_TYPES: dict[str, frozenset[DeviceType]] = {
     "relay_pump": _RELAY_DEVICE_TYPES,
     "relay_water_heater": _RELAY_DEVICE_TYPES,
     "dimmable_light": frozenset({DeviceType.DIMMABLE_LIGHT}),
-    "motor_status": frozenset(MOTOR_DEVICE_TYPES),
 }
 
 DEVICE_CLASS_SERVICE_KIND: dict[str, str] = {
@@ -67,13 +65,16 @@ DEVICE_CLASS_SERVICE_KIND: dict[str, str] = {
     "relay_pump": "switch",
     "relay_water_heater": "switch",
     "dimmable_light": "switch",
-    "motor_status": "motor_status",
 }
 
 # Device instance ranges, offset by service kind so different kinds never
 # collide. Each range must comfortably exceed the number of devices of that
-# kind ever expected on one coach -- see assign_device_instance().
-INSTANCE_BASE: dict[str, int] = {"tank": 20, "switch": 700, "motor_status": 800}
+# kind ever expected on one coach -- see assign_device_instance(). "motor_status"
+# (base 800) removed 2026-08-24 along with the rest of motor status support --
+# see ARCHITECTURE.md's "Motor Status Support -- Removed" note before reusing
+# base 800 for anything else, to avoid colliding with any already-persisted
+# motor_status device_instance still sitting in an existing config.json.
+INSTANCE_BASE: dict[str, int] = {"tank": 20, "switch": 700}
 INSTANCE_RANGE = 100
 
 # FUNCTION_NAME -> com.victronenergy.tank /FluidType value (per Venus OS's
@@ -103,8 +104,15 @@ def validate_device_class(device_class: str, observed_type: DeviceType | None) -
     return observed_type in expected
 
 
-def output_type_for(device_class: str) -> OutputType:
-    if device_class == "dimmable_light":
+def output_type_for(device_class: str, dimming_capable: bool = True) -> OutputType:
+    """dimming_capable is only consulted for device_class="dimmable_light"
+    -- it's how publisher.py's live PID 161 read (2026-08-24, see
+    ARCHITECTURE.md) tells a dimmable_light configured to behave as a plain
+    on/off switch (SIMULATE_ON_OFF_STYLE_LIGHT=1) apart from a real dimmer,
+    without changing device_class itself (which stays "dimmable_light" for
+    command-building purposes -- the underlying CAN command shape is
+    unaffected by this PID, only the device's own physical response is)."""
+    if device_class == "dimmable_light" and dimming_capable:
         return OutputType.DIMMABLE
     return OutputType.TOGGLE
 
@@ -184,9 +192,13 @@ def infer_device_class(stable_key: StableKey, device_type_label: str) -> str | N
     fully determined by the bus, the same way a human reviewing the
     discovery log would work it out. Returns None if DEVICE_TYPE is
     unrecognized (device_type_label doesn't match a DeviceType member, e.g.
-    a raw/unmapped value) or isn't one of the six supported device classes
+    a raw/unmapped value) or isn't one of the five supported device classes
     (e.g. GENERATOR_GENIE, CHASSIS_INFO, BLUETOOTH_GATEWAY have no service
-    type in this project)."""
+    type in this project). Motor DeviceTypes (awning/slide/jack) are also
+    unsupported here as of 2026-08-24 -- motor status support was removed
+    (see ARCHITECTURE.md's "Motor Status Support -- Removed" note), so a
+    motor now returns None the same as any other unsupported DEVICE_TYPE,
+    and won't be offered in manage-devices' addable-device list."""
     try:
         device_type = DeviceType[device_type_label]
     except KeyError:
@@ -196,8 +208,6 @@ def infer_device_class(stable_key: StableKey, device_type_label: str) -> str | N
         return "tank"
     if device_type == DeviceType.DIMMABLE_LIGHT:
         return "dimmable_light"
-    if device_type in MOTOR_DEVICE_TYPES:
-        return "motor_status"
     if device_type in _RELAY_DEVICE_TYPES:
         if stable_key.kind == "function_name":
             if stable_key.primary in _WATER_HEATER_FUNCTION_NAMES:

@@ -38,8 +38,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "devices": [],
 }
 
+# "motor_status" removed 2026-08-24 along with the rest of motor status
+# support -- see ARCHITECTURE.md's "Motor Status Support -- Removed" note.
 VALID_DEVICE_CLASSES = frozenset(
-    {"tank", "relay_light", "dimmable_light", "relay_pump", "relay_water_heater", "motor_status"}
+    {"tank", "relay_light", "dimmable_light", "relay_pump", "relay_water_heater"}
 )
 
 
@@ -208,6 +210,30 @@ class ConfigManager:
             for device in devices:
                 if device.get("stable_key") == target:
                     device["group"] = group
+                    config["devices"] = devices
+                    self._write_locked(config)
+                    return
+            raise KeyError(f"stable_key not found in config: {target}")
+
+    def get_show_ui_control(self, stable_key: StableKey) -> int:
+        """Venus OS switch visibility bitmask (SwitchableOutput/0/Settings/
+        ShowUIControl -- confirmed against Victron's own dbus wiki: 0=hidden
+        everywhere, 1=always shown, 2=local UIs only, 4=remote/VRM UIs
+        only). Defaults to 1 (always shown), matching this path's own
+        documented default and this project's behavior before the path
+        existed at all (nothing was ever hidden)."""
+        device = self.find_device(stable_key)
+        value = device.get("show_ui_control") if device else None
+        return value if value is not None else 1
+
+    def set_show_ui_control(self, stable_key: StableKey, value: int) -> None:
+        target = stable_key.to_config_string()
+        with self._lock():
+            config = self._read_unlocked()
+            devices = config.get("devices", [])
+            for device in devices:
+                if device.get("stable_key") == target:
+                    device["show_ui_control"] = value
                     config["devices"] = devices
                     self._write_locked(config)
                     return

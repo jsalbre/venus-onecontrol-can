@@ -47,12 +47,6 @@
       "device_class": "dimmable_light",
       "commands_enabled": false,
       "group": ""
-    },
-    {
-      "stable_key": "function_name=105,function_instance=1",
-      "friendly_name": "Awning 1",
-      "expose": false,
-      "device_class": "motor_status"
     }
   ]
 }

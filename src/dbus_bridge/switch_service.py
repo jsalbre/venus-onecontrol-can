@@ -68,6 +68,9 @@ class SwitchService:
         on_command=None,
         initial_group: str = "",
         on_group_change=None,
+        initial_show_ui_control: int = 1,
+        on_show_ui_control_change=None,
+        dimming_capable: bool = True,
     ) -> None:
         self.stable_key = stable_key
         self.friendly_name = friendly_name
@@ -77,7 +80,14 @@ class SwitchService:
         self.on_command = on_command
         self.group = initial_group
         self.on_group_change = on_group_change
-        self.is_dimmable = device_class == "dimmable_light"
+        self.show_ui_control = initial_show_ui_control
+        self.on_show_ui_control_change = on_show_ui_control_change
+        self.dimming_capable = dimming_capable
+        # dimming_capable only matters when device_class is actually
+        # "dimmable_light" -- see device_mapping.output_type_for()'s
+        # docstring for why this is a separate flag from device_class
+        # rather than a different device_class value.
+        self.is_dimmable = device_class == "dimmable_light" and dimming_capable
 
         self.service_name = f"com.victronenergy.switch.onecontrol_{stable_id_for(stable_key)}"
 
@@ -118,6 +128,20 @@ class SwitchService:
             self.group = value
             if self.on_group_change:
                 self.on_group_change(self.stable_key, value)
+        return True
+
+    def _handle_show_ui_control_change(self, path, value):
+        """Settings/ShowUIControl -- confirmed against Victron's own dbus
+        wiki (github.com/victronenergy/venus/wiki/dbus#switch): a bitmask,
+        0=hidden everywhere, 1=always shown (bit 0 set overrides the rest),
+        2=local UIs only (GX/MFD/WASM), 4=remote UIs only (VRM remote
+        console/switch pane). This service does nothing with the value
+        itself beyond persisting it, same as Settings/Group."""
+        value = int(value)
+        if value != self.show_ui_control:
+            self.show_ui_control = value
+            if self.on_show_ui_control_change:
+                self.on_show_ui_control_change(self.stable_key, value)
         return True
 
     def _handle_state_write(self, path, value):
@@ -177,7 +201,7 @@ class SwitchService:
             "alphabetical device sort (confirmed against gui-v2's BaseDevice::name()/device.cpp).",
         )
 
-        output_type = output_type_for(self.device_class)
+        output_type = output_type_for(self.device_class, self.dimming_capable)
         output_function = output_function_for(self.device_class)
 
         self._dbusservice.add_path(
@@ -205,6 +229,13 @@ class SwitchService:
             onchangecallback=self._handle_group_change,
             description="GUI panel group -- devices sharing a non-empty group name are shown "
             "together in one panel instead of each getting its own.",
+        )
+        self._dbusservice.add_path(
+            _PATH_BASE + "Settings/ShowUIControl",
+            value=self.show_ui_control,
+            writeable=True,
+            onchangecallback=self._handle_show_ui_control_change,
+            description="0=hidden everywhere, 1=always shown, 2=local UIs only, 4=remote/VRM UIs only.",
         )
         self._dbusservice.add_path(_PATH_BASE + "Settings/Type", value=int(output_type), writeable=False)
         self._dbusservice.add_path(

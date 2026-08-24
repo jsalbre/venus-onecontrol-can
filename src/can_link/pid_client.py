@@ -86,6 +86,17 @@ PID_DEVICE_TYPE = 183
 # evidence they mean anything on this hardware family.
 PID_LOAD_TYPE = 451
 
+# Confirmed real root cause of a dimming-capable output behaving as a plain
+# on/off latch (2026-08-21, real hardware) -- see ARCHITECTURE.md's "PID
+# Reconfiguration" design decision. 0 = behaves as a real dimmer, 1 =
+# behaves as a plain on/off switch. DIAGNOSTIC-session-gated for writes;
+# reads need no session, same as any other PID_READ_WRITE read. Read live
+# by publisher.py (2026-08-24) to decide a dimmable_light's D-Bus
+# presentation (Settings/Type, whether the Dimming path exists at all) --
+# see "PID 161 Live Read (dimmable_light D-Bus presentation)" in
+# ARCHITECTURE.md.
+PID_SIMULATE_ON_OFF_STYLE_LIGHT = 161
+
 
 @dataclass(frozen=True)
 class ConfigurableSetting:
@@ -118,7 +129,7 @@ class ConfigurableSetting:
 # decision).
 KNOWN_SETTINGS: tuple[ConfigurableSetting, ...] = (
     ConfigurableSetting(
-        pid=161,
+        pid=PID_SIMULATE_ON_OFF_STYLE_LIGHT,
         name="SIMULATE_ON_OFF_STYLE_LIGHT",
         applies_to=frozenset({DeviceType.DIMMABLE_LIGHT}),
         description="0 = behaves as a real dimmer, 1 = behaves as a plain on/off switch (a genuine "

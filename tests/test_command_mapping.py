@@ -83,10 +83,6 @@ class UnsupportedDeviceClassTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             command_frame_for_switch_write("tank", 0xF9, 0x1D, desired_on=True)
 
-    def test_motor_status_has_no_command_builder(self):
-        with self.assertRaises(ValueError):
-            command_frame_for_switch_write("motor_status", 0xF9, 0x1D, desired_on=True)
-
 
 if __name__ == "__main__":
     unittest.main()

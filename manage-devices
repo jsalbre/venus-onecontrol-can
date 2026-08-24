@@ -30,6 +30,15 @@ Unity module ports documented in ARCHITECTURE.md -- multiple physical
 non-devices share that exact fallback identity, so there's no single
 reliable device to enable).
 
+For switch-kind devices (relay_light/relay_pump/relay_water_heater/
+dimmable_light), both the add flow and "Manage existing devices" also offer
+GUI panel group (Settings/Group) and show-controls (Settings/ShowUIControl
+-- Off/Always/Only Local/Only on VRM, matching Node-RED's own virtual-switch
+naming) -- see ARCHITECTURE.md's Switch Paths section for exactly what
+these D-Bus paths mean. Group-setting was already available for existing
+devices before 2026-08-24; adding it to the add flow too, and adding
+show-controls entirely, were both added that day per explicit user request.
+
 Note on what takes effect live vs. needs a restart: toggling
 commands_enabled takes effect immediately (command_gate.py reads config
 fresh from disk on every command attempt). Adding a device (expose=true)
@@ -37,8 +46,9 @@ also takes effect live -- publisher.py's _handle_device_id() re-evaluates
 routing against the freshly-read config on every DEVICE_ID broadcast
 (~1/sec), so a newly-exposed device gets its D-Bus service created within
 about a second, no restart needed. Renaming a device or changing its GUI
-group, by contrast, DOES need a restart even though nothing above suggests
-it should -- friendly_name/initial_group are only read once, at the moment
+group or show-controls setting, by contrast, DOES need a restart even
+though nothing above suggests it should -- friendly_name/initial_group/
+initial_show_ui_control are only read once, at the moment
 _create_service() runs, and baked into that service object; there's no
 live path to push a later config edit back into an already-created
 service. Toggling expose off, or removing a device entirely, also needs a
@@ -83,6 +93,40 @@ def _commands_label(config: ConfigManager, key: StableKey, device_class: str) ->
     if device_class not in COMMANDABLE_DEVICE_CLASSES:
         return "N/A"
     return "Yes" if config.commands_enabled_for(key) else "No"
+
+
+# SwitchableOutput/0/Settings/ShowUIControl -- confirmed against Victron's
+# own dbus wiki (github.com/victronenergy/venus/wiki/dbus#switch): a
+# bitmask, not a plain enum (1="show in all UIs" overrides bits 1/2; 2 and
+# 4 are mutually exclusive "local only"/"remote only" bits) -- but only
+# these four combinations are meaningful choices for a human, matching
+# Node-RED's own virtual-switch UI naming exactly.
+SHOW_UI_CONTROL_CHOICES: dict[str, int] = {"Off": 0, "Always": 1, "Only Local": 2, "Only on VRM": 4}
+SHOW_UI_CONTROL_LABELS: dict[int, str] = {v: k for k, v in SHOW_UI_CONTROL_CHOICES.items()}
+
+
+def _show_ui_control_label(value: int) -> str:
+    return SHOW_UI_CONTROL_LABELS.get(value, f"unknown ({value})")
+
+
+def prompt_show_ui_control(current: int) -> int | None:
+    """Returns the newly-chosen value, or None if the user left it
+    unchanged/cancelled."""
+    print(f"  Show controls (currently: {_show_ui_control_label(current)}):")
+    options = list(SHOW_UI_CONTROL_CHOICES.items())
+    for i, (label, _value) in enumerate(options, start=1):
+        print(f"    {i}) {label}")
+    choice = input(f"  Choose 1-{len(options)}, or blank to leave unchanged: ").strip()
+    if not choice:
+        return None
+    try:
+        index = int(choice)
+        if not (1 <= index <= len(options)):
+            raise ValueError
+    except ValueError:
+        print("  Invalid selection -- left unchanged.")
+        return None
+    return options[index - 1][1]
 
 
 def enable_one(config: ConfigManager, discovery: DiscoveryLog) -> str | None:
@@ -132,6 +176,17 @@ def enable_one(config: ConfigManager, discovery: DiscoveryLog) -> str | None:
     if device.device_class in COMMANDABLE_DEVICE_CLASSES:
         commands_enabled = prompt_yes_no("Enable commands for this device now?", default_yes=False)
 
+    # Settings/Group only exists on switch-kind D-Bus services -- happens to
+    # be the exact same four device classes as COMMANDABLE_DEVICE_CLASSES,
+    # same as manage_one_device()'s is_switch check below.
+    group = ""
+    show_ui_control = 1
+    if device.device_class in COMMANDABLE_DEVICE_CLASSES:
+        group = input("GUI panel group [none] (blank for none, shared names group together): ").strip()
+        chosen = prompt_show_ui_control(show_ui_control)
+        if chosen is not None:
+            show_ui_control = chosen
+
     print()
     print("=" * 44)
     print("  Summary")
@@ -142,12 +197,18 @@ def enable_one(config: ConfigManager, discovery: DiscoveryLog) -> str | None:
     print(f"  Expose:           {expose}")
     if device.device_class in COMMANDABLE_DEVICE_CLASSES:
         print(f"  Commands enabled: {commands_enabled}")
+        print(f"  GUI panel group:  {group or '(none -- its own panel)'}")
+        print(f"  Show controls:    {_show_ui_control_label(show_ui_control)}")
     print()
     if not prompt_yes_no("Add this device?", default_yes=True):
         print("Cancelled.")
         return None
 
     config.add_device(device.stable_key, name, device.device_class, expose=expose, commands_enabled=commands_enabled)
+    if group:
+        config.set_device_group(device.stable_key, group)
+    if show_ui_control != 1:
+        config.set_show_ui_control(device.stable_key, show_ui_control)
     discovery.prune_configured({device.stable_key.to_config_string()})
     print(f"\nAdded {name!r} to config.")
     return "added"
@@ -171,8 +232,10 @@ def manage_one_device(config: ConfigManager, stable_key_str: str) -> bool:
         expose = bool(device.get("expose"))
         commands_enabled = bool(device.get("commands_enabled"))
         group = device.get("group") or ""
-        # Settings/Group only exists on switch-kind services -- happens to be
-        # the exact same four device classes as COMMANDABLE_DEVICE_CLASSES.
+        show_ui_control = config.get_show_ui_control(key)
+        # Settings/Group and Settings/ShowUIControl only exist on
+        # switch-kind services -- happens to be the exact same four device
+        # classes as COMMANDABLE_DEVICE_CLASSES.
         is_switch = device_class in COMMANDABLE_DEVICE_CLASSES
 
         print()
@@ -185,6 +248,7 @@ def manage_one_device(config: ConfigManager, stable_key_str: str) -> bool:
         if is_switch:
             print(f"  Commands enabled: {'Yes' if commands_enabled else 'No'}")
             print(f"  GUI panel group:  {group or '(none -- its own panel)'}")
+            print(f"  Show controls:    {_show_ui_control_label(show_ui_control)}")
         if device.get("device_instance") is not None:
             print(f"  D-Bus instance:   {device['device_instance']}")
         print()
@@ -193,6 +257,7 @@ def manage_one_device(config: ConfigManager, stable_key_str: str) -> bool:
         if is_switch:
             print(f"  3) Toggle commands enabled (currently: {'Yes' if commands_enabled else 'No'})")
             print(f"  4) Set GUI panel group (currently: {group or '(none)'})")
+            print(f"  6) Set show controls (currently: {_show_ui_control_label(show_ui_control)})")
         print("  5) Remove this device entirely")
         print("  Q) Back")
         print()
@@ -219,6 +284,13 @@ def manage_one_device(config: ConfigManager, stable_key_str: str) -> bool:
             if new_group != group:
                 config.set_device_group(key, new_group)
                 print(f"Group set to {new_group!r}." if new_group else "Group cleared.")
+                changed = True
+        elif choice == "6" and is_switch:
+            new_value = prompt_show_ui_control(show_ui_control)
+            if new_value is not None and new_value != show_ui_control:
+                config.set_show_ui_control(key, new_value)
+                print(f"Show controls set to {_show_ui_control_label(new_value)}.")
+                print("Note: stays live on D-Bus until the service is restarted.")
                 changed = True
         elif choice == "5":
             print()

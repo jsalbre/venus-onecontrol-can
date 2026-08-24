@@ -51,7 +51,7 @@ python3 -m unittest discover -s tests
 python3 src/tools/candump_replay.py samples/<capture>.log
 ```
 
-`dbus_bridge/{tank,switch,motor_status}_service.py` and `publisher.py` require `dbus`/`gi`, which only exist on Venus OS — they're syntax-checked with `python3 -m py_compile` here, but can only be functionally tested on the Cerbo itself.
+`dbus_bridge/{tank,switch}_service.py` and `publisher.py` require `dbus`/`gi`, which only exist on Venus OS — they're syntax-checked with `python3 -m py_compile` here, but can only be functionally tested on the Cerbo itself.
 
 ---
 

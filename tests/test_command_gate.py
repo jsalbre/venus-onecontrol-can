@@ -13,7 +13,6 @@ from dbus_bridge.config_manager import ConfigManager
 
 LIGHT_KEY = StableKey("function_name", 32, 1)
 TANK_KEY = StableKey("function_name", 67, 0)
-MOTOR_KEY = StableKey("function_name", 105, 1)
 
 
 class EvaluateCommandRequestTests(unittest.TestCase):
@@ -37,11 +36,6 @@ class EvaluateCommandRequestTests(unittest.TestCase):
     def test_unsupported_device_class_is_refused(self):
         self.config.add_device(TANK_KEY, "Fresh Tank", "tank", expose=True, commands_enabled=True)
         decision = evaluate_command_request(TANK_KEY, self.config, self.address_table, now=0.0)
-        self.assertEqual(decision.result, CommandGateResult.UNSUPPORTED_DEVICE_CLASS)
-
-    def test_motor_status_is_never_commandable_even_if_misconfigured(self):
-        self.config.add_device(MOTOR_KEY, "Awning (mislabeled)", "motor_status", expose=True, commands_enabled=True)
-        decision = evaluate_command_request(MOTOR_KEY, self.config, self.address_table, now=0.0)
         self.assertEqual(decision.result, CommandGateResult.UNSUPPORTED_DEVICE_CLASS)
 
     def test_not_yet_verified_on_address_table_is_refused(self):

@@ -46,14 +46,14 @@ from can_link.address_table import AddressTable
 from can_link.command_sequencer import CommandAttempt
 from can_link.device_id import decode_device_id, stable_key
 from can_link.device_status import UnknownDeviceTypeError, decode_status
-from can_link.frame import CanFrame, ExtendedId, StandardId, decode_id
+from can_link.frame import CanFrame, ExtendedId, StandardId, decode_id, encode_extended_id
+from can_link.pid_client import PID_READ_REQUEST_CODE, PID_SIMULATE_ON_OFF_STYLE_LIGHT, build_pid_read_request, parse_pid_reply
 from can_link.types import MessageType, StableKey, function_name_label
 from dbus_bridge.backoff import RestartBackoff
 from dbus_bridge.command_gate import CommandGateResult, evaluate_command_request
 from dbus_bridge.command_mapping import command_frame_for_switch_write
 from dbus_bridge.config_manager import ConfigManager, DiscoveryLog
 from dbus_bridge.device_mapping import assign_device_instance, fluid_type_for
-from dbus_bridge.motor_status_service import MotorStatusService
 from dbus_bridge.routing import DeviceIdAction, route_device_id, status_update_method_for
 from dbus_bridge.switch_service import SwitchService
 from dbus_bridge.tank_service import TankService
@@ -63,6 +63,7 @@ _LOGGER = logging.getLogger(__name__)
 COMMAND_TIMEOUT_SWEEP_MS = 500
 BRIDGE_ANNOUNCE_INTERVAL_MS = 1000
 INTERFACE_RECOVERY_RETRY_SEC = 15.0
+PID_READ_TIMEOUT_SEC = 2.0
 
 
 @dataclass
@@ -70,6 +71,33 @@ class _ServiceEntry:
     service: object
     device_class: str
     kind: str
+
+
+@dataclass
+class _PendingDimmableRead:
+    """Tracks a dimmable_light's PID 161 (SIMULATE_ON_OFF_STYLE_LIGHT) read,
+    in flight between _handle_device_id() sending the request and either
+    _handle_extended_frame() seeing the matching RESPONSE or
+    _check_pending_dimmable_read_timeouts() giving up. No session involved
+    -- PID reads never require one (see ARCHITECTURE.md's PID_READ_WRITE
+    reference) -- so this is a single request/response, not a state
+    machine like CommandAttempt. Not safety-critical (only ever affects
+    D-Bus cosmetic presentation, never a physical command), so unlike
+    CommandAttempt there's no live re-verification before acting on the
+    result -- a stale target_address just means a wasted read, not a wrong
+    command."""
+
+    device_class: str
+    kind: str
+    target_address: int
+    requested_at: float
+    # device_class/kind are captured once, at request time, and used
+    # as-is when the read resolves -- not re-fetched from config. A
+    # device_class edit landing in the ~2s read window is a narrow,
+    # self-correcting-on-restart edge case (the service would just be
+    # created with the pre-edit class until the next restart), accepted
+    # rather than added complexity for; CommandAttempt tolerates similar
+    # staleness in its own non-safety-critical fields for the same reason.
 
 
 class Publisher:
@@ -92,6 +120,7 @@ class Publisher:
         self._bridge_address: int | None = None
         self._pending_commands: dict[StableKey, CommandAttempt] = {}
         self._queued_commands: dict[StableKey, tuple[str, bool, int | None]] = {}
+        self._pending_dimmable_reads: dict[StableKey, _PendingDimmableRead] = {}
 
         self.bus: SocketCanBus | None = None
         self._can_interface: str | None = None
@@ -137,6 +166,12 @@ class Publisher:
             self.config_manager.set_device_group(key, new_group)
         except KeyError:
             _LOGGER.warning("Cannot save group for %s: not in config", key.to_config_string())
+
+    def _save_show_ui_control(self, key: StableKey, new_value: int) -> None:
+        try:
+            self.config_manager.set_show_ui_control(key, new_value)
+        except KeyError:
+            _LOGGER.warning("Cannot save show_ui_control for %s: not in config", key.to_config_string())
 
     def _add_glib_source(self, source_id: int) -> int:
         """Every GLib.timeout_add()/io_add_watch() call in this class must
@@ -241,7 +276,10 @@ class Publisher:
     def _handle_extended_frame(self, decoded: ExtendedId, data: bytes, now: float) -> None:
         """Phase 2 discarded all point-to-point traffic. Phase 3 narrows
         that to: act only on a RESPONSE addressed to this bridge, and only
-        if it matches an in-flight CommandAttempt for that source device."""
+        if it matches an in-flight CommandAttempt or PID read for that
+        source device. message_data (the echoed request code) disambiguates
+        the two -- PID_READ_REQUEST_CODE (0x11) can never collide with the
+        command sequencer's own request codes (0x42/0x43/0x45)."""
         if decoded.message_type != MessageType.RESPONSE:
             return
         if self._bridge_address is None or decoded.target_address != self._bridge_address:
@@ -250,6 +288,11 @@ class Publisher:
         key = self._address_to_key.get(decoded.source_address)
         if key is None:
             return
+
+        if decoded.message_data == PID_READ_REQUEST_CODE:
+            self._handle_dimmable_pid_read_response(key, decoded.source_address, data, now)
+            return
+
         attempt = self._pending_commands.get(key)
         if attempt is None or attempt.target_address != decoded.source_address:
             return
@@ -259,6 +302,36 @@ class Publisher:
             self._send_frame(frame)
         if attempt.is_done:
             self._finalize_command_attempt(attempt)
+
+    def _handle_dimmable_pid_read_response(self, key: StableKey, source_address: int, data: bytes, now: float) -> None:
+        pending = self._pending_dimmable_reads.get(key)
+        if pending is None or pending.target_address != source_address:
+            return
+        del self._pending_dimmable_reads[key]
+
+        dimming_capable = True  # default: unreadable/unsupported PID 161 -> assume a real dimmer, today's behavior
+        try:
+            reply = parse_pid_reply(data)
+            if reply.pid == PID_SIMULATE_ON_OFF_STYLE_LIGHT:
+                dimming_capable = reply.raw_value == 0
+        except ValueError:
+            pass
+
+        self._create_service(key, pending.device_class, pending.kind, now, dimming_capable=dimming_capable)
+
+    def _check_pending_dimmable_read_timeouts(self) -> bool:
+        now = time.time()
+        expired = [
+            key for key, pending in self._pending_dimmable_reads.items()
+            if (now - pending.requested_at) > PID_READ_TIMEOUT_SEC
+        ]
+        for key in expired:
+            pending = self._pending_dimmable_reads.pop(key)
+            _LOGGER.debug(
+                "%s: PID 161 read timed out, creating service with default (real dimmer)", key.to_config_string()
+            )
+            self._create_service(key, pending.device_class, pending.kind, now, dimming_capable=True)
+        return True
 
     def _handle_device_id(self, source_address: int, payload: bytes, now: float) -> None:
         try:
@@ -292,9 +365,44 @@ class Publisher:
                 identity.device_type,
             )
         elif routing.action == DeviceIdAction.CREATE_SERVICE:
-            self._create_service(key, routing.device_class, routing.service_kind, now)
+            if key in self._pending_dimmable_reads:
+                pass  # read already in flight -- wait for the response or the timeout sweep
+            elif routing.device_class == "dimmable_light" and self._bridge_address is not None:
+                self._request_dimmable_pid_read(key, source_address, routing.device_class, routing.service_kind, now)
+            else:
+                # Either a non-dimmable class (no read needed), or a
+                # dimmable_light seen before the bridge had claimed its own
+                # address to read with -- create with today's default
+                # rather than wait indefinitely for a read that was never
+                # sent.
+                self._create_service(key, routing.device_class, routing.service_kind, now)
 
-    def _create_service(self, key: StableKey, device_class: str, kind: str, now: float) -> None:
+    def _request_dimmable_pid_read(
+        self, key: StableKey, target_address: int, device_class: str, kind: str, now: float
+    ) -> None:
+        """Kicks off an async, non-blocking read of PID 161
+        (SIMULATE_ON_OFF_STYLE_LIGHT) so the eventual _create_service() call
+        can shape the D-Bus service correctly from the start (real dimmer
+        vs. toggle-only, no Dimming path) -- see ARCHITECTURE.md's "PID 161
+        Live Read" note for why service creation is delayed rather than
+        created-then-mutated. No session needed for a read; this is a
+        single request/response, resolved later by _handle_extended_frame()
+        or _check_pending_dimmable_read_timeouts(). Caller must have
+        already confirmed self._bridge_address is not None."""
+        self._pending_dimmable_reads[key] = _PendingDimmableRead(device_class, kind, target_address, now)
+        can_id = encode_extended_id(
+            source_address=self._bridge_address,
+            target_address=target_address,
+            message_data=PID_READ_REQUEST_CODE,
+            message_type=MessageType.REQUEST,
+        )
+        self._send_frame(CanFrame(can_id=can_id, is_extended=True, data=build_pid_read_request(
+            PID_SIMULATE_ON_OFF_STYLE_LIGHT
+        )))
+
+    def _create_service(
+        self, key: StableKey, device_class: str, kind: str, now: float, dimming_capable: bool = True
+    ) -> None:
         import dbus
 
         friendly_name = self.config_manager.get_friendly_name(key) or "OneControl Device"
@@ -319,11 +427,9 @@ class Publisher:
                     dbusconn=dbusconn, on_name_change=self._save_friendly_name,
                     on_command=self._on_switch_command,
                     initial_group=self.config_manager.get_device_group(key), on_group_change=self._save_group,
-                )
-            elif kind == "motor_status":
-                service = MotorStatusService(
-                    key, friendly_name, device_instance, __version__,
-                    dbusconn=dbusconn, on_name_change=self._save_friendly_name,
+                    initial_show_ui_control=self.config_manager.get_show_ui_control(key),
+                    on_show_ui_control_change=self._save_show_ui_control,
+                    dimming_capable=dimming_capable,
                 )
             else:
                 _LOGGER.error("Unhandled service kind %r for %s", kind, key.to_config_string())
@@ -556,6 +662,9 @@ class Publisher:
                 self._add_glib_source(GLib.io_add_watch(self.bus.fileno(), GLib.IO_IN, self._on_socket_readable))
                 self._add_glib_source(GLib.timeout_add(30000, self._check_stale_services))
                 self._add_glib_source(GLib.timeout_add(COMMAND_TIMEOUT_SWEEP_MS, self._check_pending_command_timeouts))
+                self._add_glib_source(
+                    GLib.timeout_add(COMMAND_TIMEOUT_SWEEP_MS, self._check_pending_dimmable_read_timeouts)
+                )
                 self._start_address_claim()
 
                 self.backoff.mark_success(now=time.time())
@@ -606,6 +715,7 @@ class Publisher:
         self._address_to_key.clear()
 
         self._abort_all_pending_commands("service restarting")
+        self._pending_dimmable_reads.clear()
         self._bridge_address = None
         self._claimer = address_claim.AddressClaimer(identity_tail=self._identity_tail)
         self._active_tracker = address_claim.ActiveAddressTracker()

@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 3.6 | **Updated:** 2026-08-24
+**Version:** 4.1 | **Updated:** 2026-08-24
 
 ---
 
@@ -40,8 +40,15 @@ Two real goals: (1) assign a name/function to a currently-unused Unity module in
 
 ## Performance — publisher.py CPU usage
 
-- [ ] **Not yet deployed/measured on real hardware:** `ConfigManager`/`DiscoveryLog` caching, `tank_service.py`/`motor_status_service.py` D-Bus write batching, and `publisher.py`'s `StableKey`-keying cleanup (2026-08-24, see `CHANGELOG.md`) address a confirmed root cause (`publisher.py` observed at 11-12% CPU vs. 3-4% for the next-heaviest process). Deploy and confirm the CPU drop via `top`/`htop`, and re-exercise the live-reconfiguration workflow (add/expose a device via `manage-devices` while `publisher.py` keeps running) to confirm the caching fix didn't regress it.
+- [ ] **Deployed 2026-08-24; live-reconfiguration regression check passed (devices confirmed showing up without a restart), CPU number not yet measured/reported.** `ConfigManager`/`DiscoveryLog` caching, `tank_service.py` D-Bus write batching, and `publisher.py`'s `StableKey`-keying cleanup address a confirmed root cause (`publisher.py` observed at 11-12% CPU vs. 3-4% for the next-heaviest process). Still need: confirm the actual CPU drop via `top`/`htop` against the 11-12% baseline.
+
+## UI / manage-devices follow-ups (from real-hardware testing, 2026-08-24)
+
+- [x] **`manage-devices` now offers to set the D-Bus panel group name at add time too** (was already available for existing devices via "Manage existing devices," just missing from the add flow). Done 2026-08-24.
+- [x] **`manage-devices` now offers Venus OS's `Settings/ShowUIControl` switch-visibility setting** (Off/Always/Only Local/Only on VRM, matching Node-RED's own virtual-switch naming exactly) at both add time and via "Manage existing devices" -- confirmed against Victron's own dbus wiki, not guessed. Done 2026-08-24, per explicit user request. See `ARCHITECTURE.md`'s Switch Paths section.
+- [x] **A `dimmable_light` device_class configured (via PID 161, `SIMULATE_ON_OFF_STYLE_LIGHT`) to behave as a plain on/off switch now displays as an on/off light in the Venus OS GUI, not a dimmer.** Done 2026-08-24: `publisher.py` reads PID 161 live (async, non-blocking -- reads never need a session, unlike writes) once per `dimmable_light` at D-Bus service creation, delaying creation until the read resolves (or times out, falling back to today's dimmer-assumed behavior) so the service is correctly shaped from the start rather than mutated after the fact. See `ARCHITECTURE.md`'s "PID 161 Live Read" design decision for the full mechanics. **Not yet run on real hardware.**
 
 ## Not Planned (deliberate scope boundary)
 
-- Motor control (awnings/slides/leveling jacks) — read-only status only. Requires separate explicit re-approval, not a followup TODO.
+- Motor control (awnings/slides/leveling jacks) — never planned; commanding a motor requires holding a session open with a heartbeat, and losing it means losing the ability to send STOP. Requires separate explicit re-approval, not a followup TODO.
+- Motor status D-Bus exposure — built, confirmed working exactly as designed on real hardware (2026-08-24, its first real exercise), then removed the same day per explicit user decision (invisible in the main GUI by design, not enough real value to justify keeping it around). Full history and reinstatement instructions in `ARCHITECTURE.md`'s "Motor Status Support — Removed" section. Not a bug, not abandoned mid-work -- a deliberate, fully-documented, easily-reversible removal.

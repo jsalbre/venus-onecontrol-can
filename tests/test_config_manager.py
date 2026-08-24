@@ -43,6 +43,13 @@ class ConfigManagerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manager.add_device(LIGHT_KEY, "Kitchen Light", "not_a_real_class")
 
+    def test_add_device_rejects_motor_status(self):
+        # motor_status support was removed 2026-08-24 (see ARCHITECTURE.md's
+        # "Motor Status Support -- Removed" note) -- it's no longer a valid
+        # device_class, not just an arbitrary unrecognized string.
+        with self.assertRaises(ValueError):
+            self.manager.add_device(LIGHT_KEY, "Awning", "motor_status")
+
     def test_add_device_is_idempotent(self):
         self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
         self.manager.add_device(LIGHT_KEY, "Kitchen Light Renamed", "relay_light", expose=True)
@@ -116,6 +123,28 @@ class ConfigManagerTests(unittest.TestCase):
         self.manager.set_device_group(LIGHT_KEY, "Kitchen")
         self.manager.set_device_group(LIGHT_KEY, "")
         self.assertEqual(self.manager.get_device_group(LIGHT_KEY), "")
+
+    def test_show_ui_control_defaults_to_always(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.assertEqual(self.manager.get_show_ui_control(LIGHT_KEY), 1)
+
+    def test_unconfigured_device_show_ui_control_defaults_to_always(self):
+        self.assertEqual(self.manager.get_show_ui_control(LIGHT_KEY), 1)
+
+    def test_set_and_get_show_ui_control(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_show_ui_control(LIGHT_KEY, 2)
+        self.assertEqual(self.manager.get_show_ui_control(LIGHT_KEY), 2)
+
+    def test_set_show_ui_control_on_unknown_device_raises(self):
+        with self.assertRaises(KeyError):
+            self.manager.set_show_ui_control(LIGHT_KEY, 0)
+
+    def test_show_ui_control_persists_across_manager_instances(self):
+        self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
+        self.manager.set_show_ui_control(LIGHT_KEY, 4)
+        reloaded = ConfigManager(self.config_path)
+        self.assertEqual(reloaded.get_show_ui_control(LIGHT_KEY), 4)
 
     def test_device_instance_absent_by_default(self):
         self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)

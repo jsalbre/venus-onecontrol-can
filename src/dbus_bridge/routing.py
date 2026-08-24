@@ -68,7 +68,7 @@ def route_device_id(
 def status_update_method_for(service_kind: str, device_class: str) -> str:
     """Which update method publisher.py should call on the service for a
     decoded DEVICE_STATUS, given the service's kind/device_class."""
-    if service_kind in ("tank", "motor_status"):
+    if service_kind == "tank":
         return "update"
     if service_kind == "switch":
         return "update_dimmable" if device_class == "dimmable_light" else "update_relay"
