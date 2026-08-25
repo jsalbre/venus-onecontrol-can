@@ -317,6 +317,9 @@ class Publisher:
         except ValueError:
             pass
 
+        _LOGGER.info(
+            "%s: PID 161 read resolved, dimming_capable=%s", key.to_config_string(), dimming_capable
+        )
         self._create_service(key, pending.device_class, pending.kind, now, dimming_capable=dimming_capable)
 
     def _check_pending_dimmable_read_timeouts(self) -> bool:
@@ -327,7 +330,7 @@ class Publisher:
         ]
         for key in expired:
             pending = self._pending_dimmable_reads.pop(key)
-            _LOGGER.debug(
+            _LOGGER.warning(
                 "%s: PID 161 read timed out, creating service with default (real dimmer)", key.to_config_string()
             )
             self._create_service(key, pending.device_class, pending.kind, now, dimming_capable=True)
@@ -389,6 +392,7 @@ class Publisher:
         single request/response, resolved later by _handle_extended_frame()
         or _check_pending_dimmable_read_timeouts(). Caller must have
         already confirmed self._bridge_address is not None."""
+        _LOGGER.info("%s: requesting PID 161 (SIMULATE_ON_OFF_STYLE_LIGHT) read", key.to_config_string())
         self._pending_dimmable_reads[key] = _PendingDimmableRead(device_class, kind, target_address, now)
         can_id = encode_extended_id(
             source_address=self._bridge_address,

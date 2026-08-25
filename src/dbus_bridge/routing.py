@@ -45,11 +45,11 @@ def route_device_id(
     """Decides what to do with a freshly-decoded DEVICE_ID broadcast.
     Fails closed at every step: any missing/mismatched config data results
     in no service being created, never a best-effort guess."""
-    if not config_manager.is_exposed(key):
-        return DeviceIdRouting(DeviceIdAction.NOT_EXPOSED)
-
     if already_created:
         return DeviceIdRouting(DeviceIdAction.ALREADY_CREATED)
+
+    if not config_manager.is_exposed(key):
+        return DeviceIdRouting(DeviceIdAction.NOT_EXPOSED)
 
     device_class = config_manager.get_device_class(key)
     if device_class is None:

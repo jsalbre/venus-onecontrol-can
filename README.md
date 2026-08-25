@@ -61,7 +61,7 @@ python3 src/tools/candump_replay.py samples/<capture>.log
 
 ## Installation (Cerbo GX)
 
-Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). No public GitHub repo exists yet (planned for later -- see TODO.md), so deploy by copying the project directly as a tarball, excluding `config.json` (your real on-device config -- never overwrite it with the repo's), `samples/`, and `tests/`:
+Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). The GitHub repo (`github.com/jsalbre/venus-onecontrol-can`) is currently private, so there's no GitHub-based auto-update yet -- see ARCHITECTURE.md's "Platform Constraints (Venus OS)" section. In the meantime, deploy by copying the project directly as a tarball, excluding `config.json` (your real on-device config -- never overwrite it with the repo's), `samples/`, and `tests/`:
 
 ```bash
 tar czf /tmp/venus-onecontrol-can.tar.gz --exclude='.git' --exclude='samples' --exclude='tests' --exclude='__pycache__' --exclude='config.json' .
