@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.5 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-24
+**Version:** 0.5.6 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
 
 ---
 
@@ -63,15 +63,17 @@ python3 src/tools/candump_replay.py samples/<capture>.log
 
 Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). The GitHub repo (`github.com/jsalbre/venus-onecontrol-can`) is currently private, so there's no GitHub-based auto-update yet -- see ARCHITECTURE.md's "Platform Constraints (Venus OS)" section. In the meantime, deploy by copying the project directly as a tarball, excluding `config.json` (your real on-device config -- never overwrite it with the repo's), `samples/`, and `tests/`:
 
+Build the tarball into `dist/` (gitignored). On macOS, `--no-xattrs --no-acls --no-fflags` matters -- without them, bsdtar embeds Apple xattr/PAX headers (from `com.apple.macl`, `com.apple.quarantine`, etc.) that Linux `tar` warns about (harmlessly, but noisily) on extraction:
+
 ```bash
-tar czf /tmp/venus-onecontrol-can.tar.gz --exclude='.git' --exclude='samples' --exclude='tests' --exclude='__pycache__' --exclude='config.json' .
-scp /tmp/venus-onecontrol-can.tar.gz root@<cerbo-host>:/tmp/
+tar --no-xattrs --no-acls --no-fflags -czf dist/venus-onecontrol-can.tar.gz --exclude='.git' --exclude='samples' --exclude='tests' --exclude='__pycache__' --exclude='config.json' --exclude='dist' .
+scp dist/venus-onecontrol-can.tar.gz root@<cerbo-host>:/data/venus-onecontrol-can.tar.gz
 ```
 
 First install only, on the Cerbo:
 ```bash
 mkdir -p /data/venus-onecontrol-can
-tar xzf /tmp/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
+tar xzf /data/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
 cp /data/venus-onecontrol-can/config.example.json /data/venus-onecontrol-can/config.json
 /data/venus-onecontrol-can/setup install auto
 ```
@@ -81,7 +83,7 @@ cp /data/venus-onecontrol-can/config.example.json /data/venus-onecontrol-can/con
 Extract over the existing directory, then just re-run `setup install auto` -- do **not** manually stop/start the service around this. `setup`'s `INSTALL_SERVICES` step (`installService` in SetupHelper's `HelperResources/ServiceResources`) already diffs the run file and, if the service is currently up, sends it a clean `svc -t` restart itself. Manually stopping it first is unnecessary and was a mistake in earlier deployment notes for this project.
 
 ```bash
-tar xzf /tmp/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
+tar xzf /data/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
 /data/venus-onecontrol-can/setup install auto
 ```
 
