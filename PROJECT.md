@@ -1,6 +1,6 @@
 # PROJECT
 
-**Version:** 1.2 | **Updated:** 2026-08-22
+**Version:** 1.3 | **Updated:** 2026-08-24
 
 ---
 
@@ -15,6 +15,7 @@ Bridges a Lippert OneControl RV control system (proprietary "IDS-CAN" protocol, 
 | File | Role | Visibility |
 |------|------|------------|
 | `PROJECT.md` | This file — doc structure and roles | Public |
+| `LICENSE` | MIT (added 2026-08-24, ahead of going public) | Public |
 | `README.md` | User-facing setup, hardware wiring, safety notes | Public |
 | `CHANGELOG.md` | Append-only release history | Public |
 | `TODO.md` | Active planned work | Public |

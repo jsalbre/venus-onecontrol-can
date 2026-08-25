@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.3 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-24
+**Version:** 0.5.4 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-24
 
 ---
 
@@ -100,3 +100,9 @@ Its first menu shows a numbered list of addable devices (already-configured devi
 Devices using the `(PRODUCT_ID, instance)` fallback key (unconfigured/unnamed inputs — see `ARCHITECTURE.md`'s stable-key design decision) are never offered, since multiple physical (non-)devices share that exact fallback identity and there's no single reliable device to enable there.
 
 Choose `M) Manage existing devices` from that same first menu to rename a device, toggle its `expose`/`commands_enabled` flags, or remove it entirely (`device_class` still isn't editable there, for the same reason it's never asked at add time). The tool offers to restart the service after any change, but only some of them actually need one: toggling `commands_enabled` takes effect immediately, and so does adding/exposing a new device (the running service creates its D-Bus object live, the next time that device's `DEVICE_ID` broadcast arrives). Toggling `expose` off or removing a device is the one case that genuinely needs the restart — there's no live teardown path, so it stays on D-Bus until the service restarts.
+
+---
+
+## License
+
+MIT — see `LICENSE`.

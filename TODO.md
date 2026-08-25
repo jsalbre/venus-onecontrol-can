@@ -1,6 +1,6 @@
 # TODO
 
-**Version:** 4.1 | **Updated:** 2026-08-24
+**Version:** 4.2 | **Updated:** 2026-08-24
 
 ---
 
@@ -38,9 +38,11 @@ Two real goals: (1) assign a name/function to a currently-unused Unity module in
 - [x] **First real-hardware run (2026-08-23) failed, root cause found and fixed (2026-08-24), confirmed working end-to-end (2026-08-24):** renaming DIMM/LATCH output 7 (PID 4/5 writes) both failed against real hardware. Root cause: `build_pid_write_request()` sized the value at each PID's own declared `Formatter` width (2 bytes for PID 4, 1 for PID 5) instead of the real, universal 6-byte (`UInt48`) width every PID write actually requires -- confirmed by reading the decompiled LippertConnect `WritePidAsync`/`PAYLOAD.FromArgs` source directly, not guessed. Fixed and retried the same day: output 7 renamed to "Front Cap Light," both writes verified `PASS`, physically tested, added to `config.json`, and now live/controllable in the OneControl app. Closes out the original "assign a name to an unused port" goal. See `ARCHITECTURE.md`'s "PID Writes" section and `CHANGELOG.md`.
 - [ ] **Open side-investigation, not blocking:** PID 238 (`ON_OFF_INPUT_PIN`) looks like it records which "Configurable Input" position is wired as a device's local switch -- well-supported by real evidence but not confirmed by documentation or a physical test. PID 146 (`INPUT_SWITCH_TYPE`)'s meaning is unknown -- no enum found in the decompiled source, no observed value variation yet. The "Configurable Inputs" bank itself (3 wired-but-uncommissioned positions) has no matching visible CAN device at all in the unconfigured pool -- genuinely unresolved.
 
-## Performance — publisher.py CPU usage
+## Performance — publisher.py CPU usage (confirmed on real hardware, 2026-08-24)
 
-- [ ] **Deployed 2026-08-24; live-reconfiguration regression check passed (devices confirmed showing up without a restart), CPU number not yet measured/reported.** `ConfigManager`/`DiscoveryLog` caching, `tank_service.py` D-Bus write batching, and `publisher.py`'s `StableKey`-keying cleanup address a confirmed root cause (`publisher.py` observed at 11-12% CPU vs. 3-4% for the next-heaviest process). Still need: confirm the actual CPU drop via `top`/`htop` against the 11-12% baseline.
+`ConfigManager`/`DiscoveryLog` caching, `tank_service.py` D-Bus write batching, and `publisher.py`'s `StableKey`-keying cleanup addressed a confirmed root cause (`publisher.py` observed at 11-12% CPU vs. 3-4% for the next-heaviest process). Deployed and confirmed: CPU dropped to 7-8%, and the live-reconfiguration property (devices showing up without a restart) still holds. User confirmed 7-8% is acceptable for now -- see `CHANGELOG.md` for full detail.
+
+- [ ] **Deferred, not blocking:** two smaller, known-tiny contributors were flagged but not fixed during the original investigation -- `routing.py`'s exposure-check-before-already-created ordering (one extra O(n) scan per frame for already-created devices) and `find_device()`'s unindexed linear scan. If CPU usage ever needs to come down further, these are the known starting points, though real profiling would be needed first to confirm there isn't a different, larger remaining contributor neither investigation surfaced.
 
 ## UI / manage-devices follow-ups (from real-hardware testing, 2026-08-24)
 
