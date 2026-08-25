@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.6 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
+**Version:** 0.5.7 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
 
 ---
 
@@ -61,7 +61,7 @@ python3 src/tools/candump_replay.py samples/<capture>.log
 
 ## Installation (Cerbo GX)
 
-Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). The GitHub repo (`github.com/jsalbre/venus-onecontrol-can`) is currently private, so there's no GitHub-based auto-update yet -- see ARCHITECTURE.md's "Platform Constraints (Venus OS)" section. In the meantime, deploy by copying the project directly as a tarball, excluding `config.json` (your real on-device config -- never overwrite it with the repo's), `samples/`, and `tests/`:
+Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). The GitHub repo (`github.com/jsalbre/venus-onecontrol-can`) is public and set up for PackageManager's own GitHub-based update checking (see ARCHITECTURE.md's "Platform Constraints (Venus OS)" section) — but that only covers *updates*, not the first install: SetupHelper needs the package present on the Cerbo before it can check anything, so the first install is always the tarball method below:
 
 Build the tarball into `dist/` (gitignored). On macOS, `--no-xattrs --no-acls --no-fflags` matters -- without them, bsdtar embeds Apple xattr/PAX headers (from `com.apple.macl`, `com.apple.quarantine`, etc.) that Linux `tar` warns about (harmlessly, but noisily) on extraction:
 
