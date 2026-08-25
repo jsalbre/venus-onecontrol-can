@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.4 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-24
+**Version:** 0.5.5 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-24
 
 ---
 
@@ -38,6 +38,10 @@ See `TODO.md` for the detailed phase checklist.
    ```
 
 ---
+
+## Dependencies
+
+`ext/velib_python` (Victron's own `VeDbusService` reference implementation, MIT-licensed) is a **git submodule**, not vendored source — clone this repo with `git clone --recurse-submodules <url>`, or if already cloned without it, run `git submodule update --init` before doing anything else. `dbus_bridge/{tank,switch}_service.py` and `publisher.py` import directly from it (`sys.path` is extended at runtime to include `ext/velib_python`). It must be present locally *before* building the deploy tarball below — the build step is a plain `tar` of whatever's on disk, so a repo cloned without submodules will silently produce a tarball that's missing it, and the service will fail to import on the Cerbo.
 
 ## Development
 

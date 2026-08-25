@@ -27,4 +27,4 @@ Bridges a Lippert OneControl RV control system (proprietary "IDS-CAN" protocol, 
 
 ## Private Docs
 
-`samples/` is gitignored. It contains raw CAN captures and coach-specific reference data (e.g. physical wiring inventories) specific to this RV's OneControl installation. Never commit this directory. No `docs-private/` currently exists -- nothing yet warrants it (personal process notes, AI session logs, prompt receipts, reflections); add it if that changes.
+`samples/` is gitignored. It contains raw CAN captures and coach-specific reference data (e.g. physical wiring inventories) specific to this RV's OneControl installation. Never commit this directory. No `docs-private/` currently exists -- nothing yet warrants it (personal process notes, reflections); add it if that changes.
