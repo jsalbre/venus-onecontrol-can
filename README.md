@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 0.5.7 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
+**Version:** 1.0.0 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
 
 ---
 
