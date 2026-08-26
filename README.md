@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 1.0.0 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
+**Version:** 1.0.1 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
 
 ---
 
@@ -41,7 +41,7 @@ See `TODO.md` for the detailed phase checklist.
 
 ## Dependencies
 
-`ext/velib_python` (Victron's own `VeDbusService` reference implementation, MIT-licensed) is a **git submodule**, not vendored source — clone this repo with `git clone --recurse-submodules <url>`, or if already cloned without it, run `git submodule update --init` before doing anything else. `dbus_bridge/{tank,switch}_service.py` and `publisher.py` import directly from it (`sys.path` is extended at runtime to include `ext/velib_python`). It must be present locally *before* building the deploy tarball below — the build step is a plain `tar` of whatever's on disk, so a repo cloned without submodules will silently produce a tarball that's missing it, and the service will fail to import on the Cerbo.
+`ext/velib_python` (Victron's own `VeDbusService` reference implementation, MIT-licensed) is vendored directly into this repo (not a git submodule -- see ARCHITECTURE.md's "Vendored, Not a Submodule" note for why: GitHub's `archive/<branch>.tar.gz` endpoint, which SetupHelper's GitHub-based auto-update relies on, never includes submodule content, so a submodule here would silently ship broken on every auto-update). `dbus_bridge/{tank,switch}_service.py` and `publisher.py` import directly from it (`sys.path` is extended at runtime to include `ext/velib_python`). A plain `git clone` is all that's needed -- nothing extra to check out.
 
 ## Development
 
@@ -70,11 +70,11 @@ tar --no-xattrs --no-acls --no-fflags -czf dist/venus-onecontrol-can.tar.gz --ex
 scp dist/venus-onecontrol-can.tar.gz root@<cerbo-host>:/data/venus-onecontrol-can.tar.gz
 ```
 
-First install only, on the Cerbo:
+First install only, on the Cerbo. `config.json` and `discovered_devices.json` live under `/data/setupOptions/venus-onecontrol-can/`, not inside the package directory itself -- see ARCHITECTURE.md's "Config Lives Outside the Package Directory" note for why (in short: `/data/venus-onecontrol-can/` gets entirely replaced on every package update/reinstall, `/data/setupOptions/<packageName>/` is SetupHelper's own guaranteed-persistent location for exactly this kind of file):
 ```bash
-mkdir -p /data/venus-onecontrol-can
+mkdir -p /data/venus-onecontrol-can /data/setupOptions/venus-onecontrol-can
 tar xzf /data/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
-cp /data/venus-onecontrol-can/config.example.json /data/venus-onecontrol-can/config.json
+cp /data/venus-onecontrol-can/config.example.json /data/setupOptions/venus-onecontrol-can/config.json
 /data/venus-onecontrol-can/setup install auto
 ```
 
@@ -87,15 +87,15 @@ tar xzf /data/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
 /data/venus-onecontrol-can/setup install auto
 ```
 
-(Note: `setup`'s `INSTALL_FILES` step is a no-op for this package -- it only matters for packages that patch pre-existing Venus OS system files via a `fileList`, which this project doesn't have or need. File placement is handled by the `tar` extraction above, not by `setup` itself, until/unless this project moves to GitHub-based installs.)
+(Note: `setup`'s `INSTALL_FILES` step is a no-op for this package -- it only matters for packages that patch pre-existing Venus OS system files via a `fileList`, which this project doesn't have or need. File placement is handled by the `tar` extraction above -- or by PackageManager's own GitHub-based download/extract for an update triggered that way -- not by `setup` itself.)
 
-Edit `/data/venus-onecontrol-can/config.json` on the Cerbo to enable specific devices (`expose: true`) before or after installing — the service reloads config on every restart. Prefer `manage-devices` (below) over hand-editing where possible.
+Edit `/data/setupOptions/venus-onecontrol-can/config.json` on the Cerbo to enable specific devices (`expose: true`) before or after installing — the service reloads config on every restart. Prefer `manage-devices` (below) over hand-editing where possible.
 
 ---
 
 ## Enabling and Managing Devices
 
-Once running, the service logs every device it sees on the bus but isn't configured to `discovered_devices.json`, next to `config.json`. Use `manage-devices` to review that list and add a device interactively, or to change/remove a device already configured:
+Once running, the service logs every device it sees on the bus but isn't configured to `discovered_devices.json` (next to `config.json`, under `/data/setupOptions/venus-onecontrol-can/`). Use `manage-devices` to review that list and add a device interactively, or to change/remove a device already configured:
 
 ```bash
 /data/venus-onecontrol-can/manage-devices

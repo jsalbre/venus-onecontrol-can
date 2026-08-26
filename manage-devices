@@ -77,7 +77,7 @@ from dbus_bridge.command_gate import COMMANDABLE_DEVICE_CLASSES
 from dbus_bridge.config_manager import ConfigManager, DiscoveryLog
 from dbus_bridge.device_mapping import build_addable_list
 
-DEFAULT_CONFIG_PATH = Path("/data/venus-onecontrol-can/config.json")
+DEFAULT_CONFIG_PATH = Path("/data/setupOptions/venus-onecontrol-can/config.json")
 SERVICE_NAME = "onecontrol-can"
 
 

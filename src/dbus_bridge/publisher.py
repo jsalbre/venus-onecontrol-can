@@ -728,7 +728,7 @@ class Publisher:
 
 
 def main() -> None:
-    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/data/venus-onecontrol-can/config.json")
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/data/setupOptions/venus-onecontrol-can/config.json")
     Publisher(config_path).run()
 
 

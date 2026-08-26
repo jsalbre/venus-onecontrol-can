@@ -2,4 +2,4 @@
 
 echo "*** starting onecontrol-can ***"
 exec 2>&1
-exec nice -n 15 python3 /data/venus-onecontrol-can/src/dbus_bridge/publisher.py /data/venus-onecontrol-can/config.json
+exec nice -n 15 python3 /data/venus-onecontrol-can/src/dbus_bridge/publisher.py /data/setupOptions/venus-onecontrol-can/config.json

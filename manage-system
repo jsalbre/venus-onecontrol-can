@@ -80,7 +80,7 @@ from tools.probe_common import (
     wait_for_response,
 )
 
-DEFAULT_CONFIG_PATH = Path("/data/venus-onecontrol-can/config.json")
+DEFAULT_CONFIG_PATH = Path("/data/setupOptions/venus-onecontrol-can/config.json")
 SAMPLES_DIR = Path(__file__).resolve().parent / "samples"
 CONFIRM_PHRASE = "i understand"
 
