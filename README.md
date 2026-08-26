@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 1.0.2 (Phase 3 on real hardware, self-healing CAN bring-up) | **Updated:** 2026-08-25
+**Version:** 1.0.3 | **Updated:** 2026-08-26
 
 ---
 
@@ -18,7 +18,7 @@ Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN
 
 - Phase 0 (wiring + capture) and Phase 1 (decoder validation) are done, confirmed against real traffic from this coach.
 - Phase 2 (D-Bus publishing) is deployed and confirmed working on the real Cerbo: tank and water pump switch services registered on D-Bus, values update live, and the read-only safety gate is confirmed live (a GUI write attempt was correctly rejected and logged, not silently accepted or actually applied).
-- Phase 3 (commands) is implemented, unit tested (312 tests passing), and **confirmed working on real hardware** (on/off, brightness slider, panel sort/group, self-healing CAN interface bring-up) — see `TODO.md`'s Phase 3 section for the one remaining rollout item (a real power-loss test).
+- Phase 3 (commands) is implemented, unit tested (320 tests passing), and **confirmed working on real hardware** (on/off, brightness slider, panel sort/group, self-healing CAN interface bring-up) — see `TODO.md` for the one remaining rollout item (a real power-loss test).
 
 See `TODO.md` for the detailed phase checklist.
 
@@ -61,33 +61,36 @@ python3 src/tools/candump_replay.py samples/<capture>.log
 
 ## Installation (Cerbo GX)
 
-Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). The GitHub repo (`github.com/jsalbre/venus-onecontrol-can`) is public and set up for PackageManager's own GitHub-based update checking (see ARCHITECTURE.md's "Platform Constraints (Venus OS)" section) — but that only covers *updates*, not the first install: SetupHelper needs the package present on the Cerbo before it can check anything, so the first install is always the tarball method below:
-
-Build the tarball into `dist/` (gitignored). On macOS, `--no-xattrs --no-acls --no-fflags` matters -- without them, bsdtar embeds Apple xattr/PAX headers (from `com.apple.macl`, `com.apple.quarantine`, etc.) that Linux `tar` warns about (harmlessly, but noisily) on extraction:
+Installed as a SetupHelper package, entirely via SSH — no reliance on the Classic GUI's PackageManager menu (this system may run GUIv2, where that menu isn't available). The GitHub repo (`github.com/jsalbre/venus-onecontrol-can`) is public and set up for PackageManager's own GitHub-based update checking (see ARCHITECTURE.md's "Platform Constraints (Venus OS)" section) — but that only covers *updates*, not the first install: SetupHelper needs the package present on the Cerbo before it can check anything, so the first install downloads the same public archive directly onto the Cerbo — no build step, nothing to do on a development machine first:
 
 ```bash
-tar --no-xattrs --no-acls --no-fflags -czf dist/venus-onecontrol-can.tar.gz --exclude='.git' --exclude='samples' --exclude='tests' --exclude='__pycache__' --exclude='config.json' --exclude='dist' .
-scp dist/venus-onecontrol-can.tar.gz root@<cerbo-host>:/data/venus-onecontrol-can.tar.gz
-```
-
-First install only, on the Cerbo. `config.json` and `discovered_devices.json` live under `/data/setupOptions/venus-onecontrol-can/`, not inside the package directory itself -- see ARCHITECTURE.md's "Config Lives Outside the Package Directory" note for why (in short: `/data/venus-onecontrol-can/` gets entirely replaced on every package update/reinstall, `/data/setupOptions/<packageName>/` is SetupHelper's own guaranteed-persistent location for exactly this kind of file):
-```bash
-mkdir -p /data/venus-onecontrol-can /data/setupOptions/venus-onecontrol-can
-tar xzf /data/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
+mkdir -p /tmp/venus-onecontrol-can-download /data/venus-onecontrol-can /data/setupOptions/venus-onecontrol-can
+wget -qO /tmp/venus-onecontrol-can-download/archive.tar.gz https://github.com/jsalbre/venus-onecontrol-can/archive/main.tar.gz
+tar xzf /tmp/venus-onecontrol-can-download/archive.tar.gz -C /tmp/venus-onecontrol-can-download
+mv /tmp/venus-onecontrol-can-download/venus-onecontrol-can-*/* /data/venus-onecontrol-can/
 cp /data/venus-onecontrol-can/config.example.json /data/setupOptions/venus-onecontrol-can/config.json
 /data/venus-onecontrol-can/setup install auto
 ```
 
+`config.json` and `discovered_devices.json` live under `/data/setupOptions/venus-onecontrol-can/`, not inside the package directory itself -- see ARCHITECTURE.md's "Config Lives Outside the Package Directory" note for why (in short: `/data/venus-onecontrol-can/` gets entirely replaced on every package update, `/data/setupOptions/<packageName>/` is SetupHelper's own guaranteed-persistent location for exactly this kind of file).
+
 ### Updating an existing install
 
-Extract over the existing directory, then just re-run `setup install auto` -- do **not** manually stop/start the service around this. `setup`'s `INSTALL_SERVICES` step (`installService` in SetupHelper's `HelperResources/ServiceResources`) already diffs the run file and, if the service is currently up, sends it a clean `svc -t` restart itself. Manually stopping it first is unnecessary and was a mistake in earlier deployment notes for this project.
+Preferred: PackageManager's own GitHub-based update checking, once the GitHub user/branch fields are set on this package in PackageManager's edit screen (`jsalbre` / `main`) -- it downloads, installs, and restarts the service on its own, no SSH needed.
+
+Manual fallback (e.g. troubleshooting, or no internet access on the Cerbo): re-run the same download commands as a first install, but skip the `config.json` step -- it already exists and must not be overwritten:
 
 ```bash
-tar xzf /data/venus-onecontrol-can.tar.gz -C /data/venus-onecontrol-can
+mkdir -p /tmp/venus-onecontrol-can-download
+wget -qO /tmp/venus-onecontrol-can-download/archive.tar.gz https://github.com/jsalbre/venus-onecontrol-can/archive/main.tar.gz
+tar xzf /tmp/venus-onecontrol-can-download/archive.tar.gz -C /tmp/venus-onecontrol-can-download
+mv /tmp/venus-onecontrol-can-download/venus-onecontrol-can-*/* /data/venus-onecontrol-can/
 /data/venus-onecontrol-can/setup install auto
 ```
 
-(Note: `setup`'s `INSTALL_FILES` step is a no-op for this package -- it only matters for packages that patch pre-existing Venus OS system files via a `fileList`, which this project doesn't have or need. File placement is handled by the `tar` extraction above -- or by PackageManager's own GitHub-based download/extract for an update triggered that way -- not by `setup` itself.)
+Either way, do **not** manually stop/start the service around an update. `setup`'s `INSTALL_SERVICES` step (`installService` in SetupHelper's `HelperResources/ServiceResources`) already diffs the run file and, if the service is currently up, sends it a clean `svc -t` restart itself.
+
+(Note: `setup`'s `INSTALL_FILES` step is a no-op for this package -- it only matters for packages that patch pre-existing Venus OS system files via a `fileList`, which this project doesn't have or need. File placement is handled by the extraction above, or by PackageManager's own GitHub-based download/extract, not by `setup` itself.)
 
 Edit `/data/setupOptions/venus-onecontrol-can/config.json` on the Cerbo to enable specific devices (`expose: true`) before or after installing — the service reloads config on every restart. Prefer `manage-devices` (below) over hand-editing where possible.
 
