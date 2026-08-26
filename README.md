@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 1.0.3 | **Updated:** 2026-08-26
+**Version:** 1.1.0 | **Updated:** 2026-08-26
 
 ---
 
@@ -12,15 +12,20 @@ Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN
 
 **A device is only ever published to D-Bus if it has an explicit `expose: true` entry in `config.json`, and only ever commandable if it separately has `commands_enabled: true`.** Everything discovered on the bus but not configured is logged to `discovered_devices.json` for review, never exposed automatically.
 
+**A device briefly stops responding to commands right after a bus outage or a service restart** — its address isn't trusted again until it broadcasts fresh. This is expected, momentary behavior, not a bug.
+
 ---
 
-## Status
+## Features
 
-- Phase 0 (wiring + capture) and Phase 1 (decoder validation) are done, confirmed against real traffic from this coach.
-- Phase 2 (D-Bus publishing) is deployed and confirmed working on the real Cerbo: tank and water pump switch services registered on D-Bus, values update live, and the read-only safety gate is confirmed live (a GUI write attempt was correctly rejected and logged, not silently accepted or actually applied).
-- Phase 3 (commands) is implemented, unit tested (320 tests passing), and **confirmed working on real hardware** (on/off, brightness slider, panel sort/group, self-healing CAN interface bring-up) — see `TODO.md` for the one remaining rollout item (a real power-loss test).
+- **Live status** — tank levels, and light/relay/pump/water-heater state, appear natively in the Venus OS GUI and VRM.
+- **Two-way control** — turn lights/pump/water heater on/off and adjust dimmable lights' brightness directly from the Cerbo GUI or VRM; every write passes through a layered safety gate (see above) before a real command is attempted.
+- **GUI panel grouping** — give two or more switches the same group name (via `manage-devices` or directly in the Cerbo GUI's own per-output settings page) to show them together in one panel instead of each getting its own.
+- **Per-device visibility control** — show a switch everywhere, hide it entirely, or restrict it to local UIs (GX/MFD) or VRM's remote console only (`manage-devices`'s "Show controls" option) — the same Off/Always/Only Local/Only on VRM choice Node-RED's own virtual switches offer.
+- **Automatic dimmer vs. on/off detection** — a dimming-capable output configured (via `manage-system`, below) to behave as a plain on/off switch is detected automatically and shown as a plain switch, not a non-functional dimmer.
+- **Self-healing CAN interface** — recovers on its own if the interface goes down (e.g. after a Venus OS firmware update, or it isn't up yet at boot), no manual step needed in normal operation.
 
-See `TODO.md` for the detailed phase checklist.
+See `TODO.md` for currently open work and `CHANGELOG.md` for the full history.
 
 ---
 
@@ -109,6 +114,50 @@ Its first menu shows a numbered list of addable devices (already-configured devi
 Devices using the `(PRODUCT_ID, instance)` fallback key (unconfigured/unnamed inputs — see `ARCHITECTURE.md`'s stable-key design decision) are never offered, since multiple physical (non-)devices share that exact fallback identity and there's no single reliable device to enable there.
 
 Choose `M) Manage existing devices` from that same first menu to rename a device, toggle its `expose`/`commands_enabled` flags, or remove it entirely (`device_class` still isn't editable there, for the same reason it's never asked at add time). The tool offers to restart the service after any change, but only some of them actually need one: toggling `commands_enabled` takes effect immediately, and so does adding/exposing a new device (the running service creates its D-Bus object live, the next time that device's `DEVICE_ID` broadcast arrives). Toggling `expose` off or removing a device is the one case that genuinely needs the restart — there's no live teardown path, so it stays on D-Bus until the service restarts.
+
+For switch-kind devices, both the add flow and "Manage existing devices" also offer to set a **GUI panel group** (devices sharing a group name appear together in one Cerbo GUI panel) and **Show controls** (`Off`/`Always`/`Only Local`/`Only on VRM` — the same visibility choice Node-RED's own virtual switches offer). Unlike `expose`/`commands_enabled`, both of these are read once at service creation, so they need the restart the tool offers — editing them takes effect on the *next* restart, not immediately. Both are also directly editable from the Cerbo GUI's own per-output settings page if you'd rather not use `manage-devices` for it.
+
+---
+
+## Identifying Unconfigured Physical Outputs
+
+Not every device on your OneControl bus broadcasts a real name. An output or input that's never been assigned a function on the Unity module reports a generic placeholder identity, and multiple unconfigured ports on the same module usually share that *exact* placeholder — so they can't be told apart just by looking at `discovered_devices.json`.
+
+To figure out which physical port an unconfigured device actually is:
+
+1. Run `list_unconfigured.py` against a known, already-named device on the same physical module, to list every other unconfigured device sharing that module:
+   ```bash
+   /data/venus-onecontrol-can/src/tools/list_unconfigured.py --reference-stable-key "function_name=<N>,function_instance=<M>"
+   ```
+   Each result includes a `device_instance` value — a sequential counter, scoped per device type, across your whole module (see `ARCHITECTURE.md`'s "device_instance" section for the full mechanism and a worked example). Cross-referencing that sequence against your own wiring documentation (which connector bank comes first, how many positions each bank has) is usually enough to form a strong hypothesis — this reasoning applies to any Unity module, though the actual sequence numbers and wiring will differ on every installation.
+2. Confirm a hypothesis physically before trusting it, watching a multimeter on the terminal you think it is:
+   ```bash
+   /data/venus-onecontrol-can/src/tools/relay_blip.py --address 0x11 --confirm
+   ```
+   Without `--confirm` it only prints what it *would* do — always try it without `--confirm` first. This sends a real ON, waits (`--hold-seconds`, default 2s, capped at 4s), then OFF — **make sure nothing except a multimeter (voltage mode) is connected to the terminal you're testing.**
+
+Only once you're physically certain which port you're looking at should you use `manage-system` (below) to actually assign it a name.
+
+---
+
+## Reconfiguring Your OneControl/Unity Module (`manage-system`)
+
+**`manage-system` reconfigures the OneControl/Unity module itself — not just this bridge's D-Bus config.** Use it to assign a name/function to a currently-unused port, or change a device's on-module behavior setting (currently: dimming vs. latching). This is fundamentally different from `manage-devices`, which never touches your OneControl hardware at all.
+
+**This is real, unguarded hardware access.** There is no config-gated safety net here the way there is for D-Bus commands — writing to the wrong target, or the wrong setting, can affect a live device you depend on (a water pump, water heater, or a light). If your installation has no OneControl touchscreen, there's no official Lippert tooling to revert a bad write either. `manage-system` itself requires typing `i understand` before it does anything, and every write is read back and verified — but that only catches a *failed* write, not a *wrong* one. **Identify your target physically first** (see above) before ever using its "configure a port" flow, and let it run its own post-write test blip to confirm before adding a newly-named device to your config.
+
+```bash
+/data/venus-onecontrol-can/manage-system
+```
+
+See `ARCHITECTURE.md`'s "PID Reconfiguration" design decision for full technical detail (exact PIDs, session requirements, what each menu option does).
+
+---
+
+## Logs
+
+- App-level log: `/data/setupOptions/venus-onecontrol-can/logs/onecontrol-can.log` (rotates at 1MB x 7, human-readable timestamps). Controlled by `log_level` in `config.json` (default `INFO`; set to `DEBUG` for verbose per-write/per-command detail).
+- Raw service output — also catches a crash from before the app's own logging even starts: `tail -n 100 /var/log/onecontrol-can/current` (runit/multilog capture, TAI64N-format timestamps).
 
 ---
 
