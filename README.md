@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 1.1.0 | **Updated:** 2026-08-26
+**Version:** 1.1.1 | **Updated:** 2026-08-26
 
 ---
 
@@ -8,7 +8,7 @@
 
 Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN" protocol — not RV-C) to a Victron Cerbo GX MK2's spare CAN interface, so tank levels and light/relay/pump/water-heater state appear natively in the Venus OS GUI and VRM, and those same devices can be controlled from there.
 
-**Motor-driven devices (awnings, slides, leveling jacks) are read-only.** This project never sends a command that could move one — see `ARCHITECTURE.md` for why.
+**Motor-driven devices (awnings, slides, leveling jacks) are never exposed at all** — not even read-only. This project never sends a command that could move one, and doesn't publish their status either — see `ARCHITECTURE.md` for why.
 
 **A device is only ever published to D-Bus if it has an explicit `expose: true` entry in `config.json`, and only ever commandable if it separately has `commands_enabled: true`.** Everything discovered on the bus but not configured is logged to `discovered_devices.json` for review, never exposed automatically.
 
