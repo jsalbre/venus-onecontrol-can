@@ -144,7 +144,7 @@ class Publisher:
         log_path = self.config_path.parent / "logs" / "onecontrol-can.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        handler = RotatingFileHandler(log_path, maxBytes=10 * 1024 * 1024, backupCount=7)
+        handler = RotatingFileHandler(log_path, maxBytes=1 * 1024 * 1024, backupCount=7)
         formatter = logging.Formatter(
             "%(asctime)s - %(levelname)s - %(name)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )

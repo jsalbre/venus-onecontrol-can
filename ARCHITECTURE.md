@@ -1,6 +1,6 @@
 # Architecture
 
-**Version:** 4.3 | **Updated:** 2026-08-24
+**Version:** 4.4 | **Updated:** 2026-08-25
 
 ---
 
@@ -615,6 +615,15 @@ Fixed (2026-08-25) by vendoring the exact same commit (`17bbcd4c632d3eda484cde61
 `config.json` and `discovered_devices.json` used to live inside `/data/venus-onecontrol-can/` itself, alongside the code. That's fatal for the same reason as the submodule issue: `GitHubDownload()`'s directory-replace-then-delete sequence (see above) wipes the *entire* package directory on every GitHub-triggered update, and neither file is (or should be) tracked in git -- they're real per-installation state (which devices are exposed, friendly names, `commands_enabled`, group assignments, this bridge's own persisted CAN identity tail). The first real GitHub-triggered update (2026-08-25) deleted a real, in-use `config.json` this way -- unrecoverable from git, since it was correctly gitignored the whole time; recovered only because a full copy had separately been pasted into this project's own working notes days earlier.
 
 Fixed by moving both files to `/data/setupOptions/venus-onecontrol-can/` -- confirmed directly from SetupHelper's own source (`HelperResources/EssentialResources`: `setupOptionsRoot="/data/setupOptions"`, `setupOptionsDir="$setupOptionsRoot"/$packageName`) and its `PackageDevelopmentGuidelines.md` ("the location of any files that control installation... maintained in a separate directory so reinstalling the package does not remove them"). This directory is explicitly guaranteed by SetupHelper's own design to survive both package updates and Venus OS firmware updates -- it's the one place outside of git that's actually safe for this kind of state. `ConfigManager.__init__()` already creates its config path's parent directory if missing (`mkdir(parents=True, exist_ok=True)`), so no separate provisioning step was needed beyond changing the path itself: `services/onecontrol-can/run`'s invocation, `publisher.py`'s CLI-arg fallback, and `manage-devices`/`manage-system`'s `DEFAULT_CONFIG_PATH` all point at the new location now. `discovered_devices.json` moves automatically alongside it, since it's always derived as `config_path.parent / "discovered_devices.json"`, never an independently hardcoded path.
+
+### Log Rotation
+
+Two independent logs exist for this service, and that's intentional, not redundant -- though the app-level one was originally sized wrong:
+
+- **`/var/log/onecontrol-can/current`** -- runit's standard multilog capture of the service's raw stdout/stderr (`services/onecontrol-can/log/run`: `multilog t s25000 n4`, i.e. 4 files x 25KB = 100KB max). This is not an arbitrary number: the Venus OS wiki's `data-partition.md` confirms 100KB is the platform-wide standard cap applied to every one of the ~40 always-running Venus OS processes, specifically to protect the data partition's limited budget (28MB on a CCGX, up to 512MB on a Cerbo GX). It also catches things the app's own log structurally can't -- anything that happens before `_setup_logging()` runs, which is exactly why the `ext/velib_python` crash (see above) only ever showed up here.
+- **`logs/onecontrol-can.log`** (`publisher.py`'s own `RotatingFileHandler`, next to `config.json` -- so now under `/data/setupOptions/venus-onecontrol-can/logs/`, moved there as a side effect of the config-location fix above) -- human-readable timestamps (multilog's `t` flag uses raw TAI64N, e.g. `@4000000068a1b2c3...`, unreadable without piping through `tai64nlocal`), and more retention than 100KB allows for actually troubleshooting a real issue after the fact.
+
+**Originally sized way out of proportion (2026-08-19 through 2026-08-25, never revisited until now):** `maxBytes=10*1024*1024, backupCount=7` = up to 80MB -- 800x the platform's own 100KB-per-process convention, and by itself nearly 16% of a whole Cerbo GX's data partition for one add-on service's logs alone. Reduced to `maxBytes=1*1024*1024, backupCount=7` (up to 7MB) -- still well above the platform minimum for real troubleshooting value, without being wildly disproportionate to how every other process on the same shared, size-constrained partition behaves.
 
 **Boot-Time / Firmware-Update Package Reinstall** (confirmed 2026-08-21 by reading `reinstallMods` / `PackageManager.py` directly). Package survival across a Venus OS firmware update (which wipes `/service/` but not `/data/`) is meant to be fully automatic:
 
