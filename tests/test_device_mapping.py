@@ -145,6 +145,12 @@ class AssignDeviceInstanceTests(unittest.TestCase):
         result = assign_device_instance("tank", key, already_assigned={}, persisted=None)
         self.assertEqual(result, expected)
 
+    def test_battery_kind_uses_its_own_instance_range(self):
+        key = StableKey("device_type", 39, 0)
+        expected = INSTANCE_BASE["battery"] + stable_id_for(key, modulo=INSTANCE_RANGE)
+        result = assign_device_instance("battery", key, already_assigned={}, persisted=None)
+        self.assertEqual(result, expected)
+
     def test_collision_probes_forward_to_a_free_slot(self):
         key = StableKey("function_name", 67, 0)
         natural = INSTANCE_BASE["tank"] + stable_id_for(key, modulo=INSTANCE_RANGE)
@@ -304,9 +310,13 @@ class InferDeviceClassTests(unittest.TestCase):
 
     def test_unsupported_but_recognized_device_types_return_none(self):
         key = StableKey("function_name", 95, 0)
-        for label in ("GENERATOR_GENIE", "CHASSIS_INFO", "BLUETOOTH_GATEWAY", "HOUR_METER"):
+        for label in ("GENERATOR_GENIE", "BLUETOOTH_GATEWAY", "HOUR_METER"):
             with self.subTest(label=label):
                 self.assertIsNone(infer_device_class(key, label))
+
+    def test_chassis_info_returns_battery_voltage(self):
+        key = StableKey("device_type", 39, 0)
+        self.assertEqual(infer_device_class(key, "CHASSIS_INFO"), "battery_voltage")
 
     def test_pump_function_name_only_applies_to_function_name_keys(self):
         # A product_id-fallback key sharing the numeric value 5 by
@@ -347,6 +357,15 @@ class BuildAddableListTests(unittest.TestCase):
         discovered = {"function_name=49,function_instance=1": {"device_type": "DIMMABLE_LIGHT", "function_name": "Awning Light"}}
         result = build_addable_list(discovered, already_configured=set())
         self.assertEqual(result[0].suggested_friendly_name, "Awning Light 1")
+
+    def test_includes_a_device_type_keyed_chassis_info(self):
+        # Unlike a product_id-fallback key, a device_type-keyed entry isn't
+        # ambiguous (see stable_key() in device_id.py) -- must be offered.
+        discovered = {"device_type=39,device_instance=0": {"device_type": "CHASSIS_INFO", "function_name": "UNKNOWN"}}
+        result = build_addable_list(discovered, already_configured=set())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].device_class, "battery_voltage")
+        self.assertEqual(result[0].suggested_friendly_name, "Battery Voltage")
 
     def test_real_discovery_log_from_actual_hardware(self):
         # Verbatim discovered_devices.json from the 2026-08-20 deployment.

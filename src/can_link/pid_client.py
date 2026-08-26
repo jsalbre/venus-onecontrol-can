@@ -97,6 +97,11 @@ PID_LOAD_TYPE = 451
 # ARCHITECTURE.md.
 PID_SIMULATE_ON_OFF_STYLE_LIGHT = 161
 
+# Confirmed real and readable on this coach's CHASSIS_INFO node -- UINT32,
+# scale x1/65536, volts. No session required for a read. Polled periodically
+# by publisher.py for the battery_voltage device_class (see ARCHITECTURE.md).
+PID_BATTERY_VOLTAGE = 43
+
 
 @dataclass(frozen=True)
 class ConfigurableSetting:

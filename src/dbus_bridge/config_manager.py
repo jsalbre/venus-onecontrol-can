@@ -41,7 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 # "motor_status" removed 2026-08-24 along with the rest of motor status
 # support -- see ARCHITECTURE.md's "Motor Status Support -- Removed" note.
 VALID_DEVICE_CLASSES = frozenset(
-    {"tank", "relay_light", "dimmable_light", "relay_pump", "relay_water_heater"}
+    {"tank", "relay_light", "dimmable_light", "relay_pump", "relay_water_heater", "battery_voltage"}
 )
 
 

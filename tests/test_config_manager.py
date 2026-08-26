@@ -50,6 +50,11 @@ class ConfigManagerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.manager.add_device(LIGHT_KEY, "Awning", "motor_status")
 
+    def test_add_device_accepts_battery_voltage(self):
+        battery_key = StableKey("device_type", 39, 0)
+        self.manager.add_device(battery_key, "Battery Voltage", "battery_voltage")
+        self.assertEqual(self.manager.get_device_class(battery_key), "battery_voltage")
+
     def test_add_device_is_idempotent(self):
         self.manager.add_device(LIGHT_KEY, "Kitchen Light", "relay_light", expose=True)
         self.manager.add_device(LIGHT_KEY, "Kitchen Light Renamed", "relay_light", expose=True)

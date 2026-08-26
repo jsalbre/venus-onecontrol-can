@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 1.1.2 | **Updated:** 2026-08-26
+**Version:** 1.2.0 | **Updated:** 2026-08-26
 
 ---
 
@@ -24,6 +24,7 @@ Bridges a Lippert OneControl RV control system (Unity X270, proprietary "IDS-CAN
 - **Per-device visibility control** — show a switch everywhere, hide it entirely, or restrict it to local UIs (GX/MFD) or VRM's remote console only (`manage-devices`'s "Show controls" option) — the same Off/Always/Only Local/Only on VRM choice Node-RED's own virtual switches offer.
 - **Automatic dimmer vs. on/off detection** — a dimming-capable output configured (via `manage-system`, below) to behave as a plain on/off switch is detected automatically and shown as a plain switch, not a non-functional dimmer.
 - **Self-healing CAN interface** — recovers on its own if the interface goes down (e.g. after a Venus OS firmware update, or it isn't up yet at boot), no manual step needed in normal operation.
+- **House battery voltage** — if your Unity module has a `CHASSIS_INFO` node, its battery voltage reading can be enabled and exposed like any other device, refreshed on a configurable interval (`pid_poll_interval_sec`, default 30s).
 
 See `TODO.md` for currently open work and `CHANGELOG.md` for the full history.
 

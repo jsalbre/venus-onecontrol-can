@@ -57,6 +57,7 @@ DEVICE_CLASS_EXPECTED_TYPES: dict[str, frozenset[DeviceType]] = {
     "relay_pump": _RELAY_DEVICE_TYPES,
     "relay_water_heater": _RELAY_DEVICE_TYPES,
     "dimmable_light": frozenset({DeviceType.DIMMABLE_LIGHT}),
+    "battery_voltage": frozenset({DeviceType.CHASSIS_INFO}),
 }
 
 DEVICE_CLASS_SERVICE_KIND: dict[str, str] = {
@@ -65,6 +66,7 @@ DEVICE_CLASS_SERVICE_KIND: dict[str, str] = {
     "relay_pump": "switch",
     "relay_water_heater": "switch",
     "dimmable_light": "switch",
+    "battery_voltage": "battery",
 }
 
 # Device instance ranges, offset by service kind so different kinds never
@@ -74,7 +76,7 @@ DEVICE_CLASS_SERVICE_KIND: dict[str, str] = {
 # see ARCHITECTURE.md's "Motor Status Support -- Removed" note before reusing
 # base 800 for anything else, to avoid colliding with any already-persisted
 # motor_status device_instance still sitting in an existing config.json.
-INSTANCE_BASE: dict[str, int] = {"tank": 20, "switch": 700}
+INSTANCE_BASE: dict[str, int] = {"tank": 20, "switch": 700, "battery": 900}
 INSTANCE_RANGE = 100
 
 # FUNCTION_NAME -> com.victronenergy.tank /FluidType value (per Venus OS's
@@ -192,13 +194,13 @@ def infer_device_class(stable_key: StableKey, device_type_label: str) -> str | N
     fully determined by the bus, the same way a human reviewing the
     discovery log would work it out. Returns None if DEVICE_TYPE is
     unrecognized (device_type_label doesn't match a DeviceType member, e.g.
-    a raw/unmapped value) or isn't one of the five supported device classes
-    (e.g. GENERATOR_GENIE, CHASSIS_INFO, BLUETOOTH_GATEWAY have no service
-    type in this project). Motor DeviceTypes (awning/slide/jack) are also
-    unsupported here as of 2026-08-24 -- motor status support was removed
-    (see ARCHITECTURE.md's "Motor Status Support -- Removed" note), so a
-    motor now returns None the same as any other unsupported DEVICE_TYPE,
-    and won't be offered in manage-devices' addable-device list."""
+    a raw/unmapped value) or isn't one of the supported device classes (e.g.
+    GENERATOR_GENIE, BLUETOOTH_GATEWAY have no service type in this
+    project). Motor DeviceTypes (awning/slide/jack) are also unsupported --
+    motor status support was removed (see ARCHITECTURE.md's "Motor Status
+    Support -- Removed" note), so a motor now returns None the same as any
+    other unsupported DEVICE_TYPE, and won't be offered in manage-devices'
+    addable-device list."""
     try:
         device_type = DeviceType[device_type_label]
     except KeyError:
@@ -208,6 +210,8 @@ def infer_device_class(stable_key: StableKey, device_type_label: str) -> str | N
         return "tank"
     if device_type == DeviceType.DIMMABLE_LIGHT:
         return "dimmable_light"
+    if device_type == DeviceType.CHASSIS_INFO:
+        return "battery_voltage"
     if device_type in _RELAY_DEVICE_TYPES:
         if stable_key.kind == "function_name":
             if stable_key.primary in _WATER_HEATER_FUNCTION_NAMES:
@@ -232,7 +236,10 @@ def build_addable_list(discovered: dict, already_configured: set) -> list[Addabl
     product_id-fallback keys are excluded deliberately -- they're the
     known-empty/unconfigured Unity module ports documented in
     ARCHITECTURE.md, and multiple physical (non-)devices share the exact
-    same fallback identity, so there's no reliable device to enable there."""
+    same fallback identity, so there's no reliable device to enable there.
+    device_type-keyed entries (SYSTEM_SINGLETON_DEVICE_TYPES, e.g.
+    CHASSIS_INFO) don't have this ambiguity problem -- see stable_key() in
+    device_id.py -- so they're allowed through here."""
     result = []
     for key_str, info in discovered.items():
         if key_str in already_configured:
@@ -241,16 +248,19 @@ def build_addable_list(discovered: dict, already_configured: set) -> list[Addabl
             key = StableKey.from_config_string(key_str)
         except ValueError:
             continue
-        if key.kind != "function_name":
+        if key.kind not in ("function_name", "device_type"):
             continue
 
         device_class = infer_device_class(key, info.get("device_type", ""))
         if device_class is None:
             continue
 
-        name = function_name_label(key.primary)
-        if key.instance:
-            name = f"{name} {key.instance}"
+        if key.kind == "device_type":
+            name = "Battery Voltage"
+        else:
+            name = function_name_label(key.primary)
+            if key.instance:
+                name = f"{name} {key.instance}"
 
         result.append(AddableDevice(key, device_class, name))
     return result

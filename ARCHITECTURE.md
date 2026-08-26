@@ -1,6 +1,6 @@
 # Architecture
 
-**Version:** 5.1 | **Updated:** 2026-08-26
+**Version:** 5.2 | **Updated:** 2026-08-26
 
 ---
 
@@ -135,6 +135,16 @@ Every PID read/write is otherwise a manual-tool thing (`pid_probe.py`, `pid_writ
 
 Confirmed on real hardware: a real dimmer continues to show with a working Dimming path, and a device configured as latching (PID 161=1) shows as a plain on/off light instead of always rendering as a dimmer. The async read/create-delay machinery in `publisher.py` still has no unit coverage (consistent with the rest of this file's dbus/gi-dependent code -- no `tests/test_publisher.py` exists at all, see the Testability note under Source Files), though `output_type_for()`'s own parameter does.
 
+### Battery Voltage (`battery_voltage` device_class)
+
+`CHASSIS_INFO` -- a real, singleton system device on this coach's Unity module -- exposes a genuinely useful reading (PID 43, `BATTERY_VOLTAGE`) with no FUNCTION_NAME of its own (`FUNCTION_NAME=0`). Its `(PRODUCT_ID, instance)` fallback key is identical to the one shared by every other unconfigured device on the module (see "device_instance" under Protocol Reference below) -- `manage-devices`' discovery flow already deliberately refuses every fallback-keyed device for exactly this ambiguity reason, so `CHASSIS_INFO` can't be identified the way a tank or light is.
+
+**Fixed with a narrow, additive `StableKey` exception, not a change to the shared fallback logic.** A new `SYSTEM_SINGLETON_DEVICE_TYPES` frozenset (`can_link/types.py`, currently just `{DeviceType.CHASSIS_INFO}`) marks DEVICE_TYPEs that key by `(DEVICE_TYPE, device_instance)` instead of the generic `(PRODUCT_ID, instance)` fallback. `stable_key()` only takes this branch when `FUNCTION_NAME == 0` **and** the DEVICE_TYPE is in that allowlist -- every other FUNCTION_NAME=0 device (the ambiguous relay/tank pool) is completely unaffected, still falls back exactly as before. `device_instance`, not `DEVICE_TYPE` alone, disambiguates the key -- so it stays unique even if a module ever has more than one `CHASSIS_INFO`-type device, mirroring the same disambiguation already established for the unconfigured pool.
+
+**Voltage is periodically re-read, not passively decoded.** Unlike every other exposed device_class, there is no `DEVICE_STATUS` decoder for `CHASSIS_INFO` at all (`decode_status()` raises `UnknownDeviceTypeError` for it, which `_handle_device_status()` already catches and silently ignores) -- voltage only exists as PID data, which changes over time and must be actively re-requested. This is `publisher.py`'s first *recurring* PID read, as opposed to PID 161's one-shot read at service creation: a GLib timer fires `_poll_battery_voltage_devices()` on `pid_poll_interval_sec` (declared in the config schema since Phase 0/1, never wired up until this), which resolves each `battery`-kind service's *current* live address via `address_table.resolve()` (the plain, non-command-gated resolver -- this is a passive read, not a command) and sends a PID 43 request. The response is tracked in `self._pending_voltage_reads` (key -> expected address), deliberately simpler than the PID 161 read's `_PendingDimmableRead` -- no timeout sweep is needed, since a lost or late response just self-heals on the next poll cycle rather than blocking anything.
+
+**The D-Bus service (`battery_voltage_service.py`) registers only `/Dc/0/Voltage`** on a real `com.victronenergy.battery` service -- no `/Soc`, `/Dc/0/Current`, or `/Dc/0/Power`, since this project has no data for any of those and won't fabricate it, the same precedent `TankService` already set by leaving `/Capacity`/`/Remaining` unregistered rather than guessing. This is the first real-hardware test of a `com.victronenergy.battery` service with only voltage populated -- not confirmed from documentation alone whether Venus OS's GUI renders a battery monitor missing SOC gracefully. If it renders badly, the fallback is a custom, non-standard service name instead of a real `com.victronenergy.battery` -- the same pattern the now-removed `motor_status_service.py` used -- not applied preemptively since the honest, real-service approach is worth trying first.
+
 ---
 
 ## Source Files
@@ -165,6 +175,7 @@ Confirmed on real hardware: a real dimmer continues to show with a working Dimmi
 | `src/dbus_bridge/routing.py` | Pure decision logic for what publisher.py should do with a decoded frame (the second half of the safety gate). No dbus/gi -- this is what makes the exposure logic testable despite publisher.py itself requiring D-Bus. |
 | `src/dbus_bridge/backoff.py` | `RestartBackoff`, pure (explicit `now`, no real `time.sleep`). |
 | `src/dbus_bridge/tank_service.py` | `com.victronenergy.tank` service. Requires dbus/gi. |
+| `src/dbus_bridge/battery_voltage_service.py` | `com.victronenergy.battery` service, `/Dc/0/Voltage` only (no Soc/Current -- see "Battery Voltage" design decision above). Requires dbus/gi. |
 | `src/dbus_bridge/switch_service.py` | `com.victronenergy.switch` service (lights/pump/water-heater), Shelly-pattern paths, State + Dimming writeable. Requires dbus/gi. |
 | `src/dbus_bridge/command_gate.py` | Pure command safety gate decision logic (exposed + commands_enabled + supported device_class + address_table verification). No dbus/gi. |
 | `src/dbus_bridge/command_mapping.py` | Pure device_class -> CanFrame dispatch for a SwitchService write. No dbus/gi. |
@@ -172,7 +183,7 @@ Confirmed on real hardware: a real dimmer continues to show with a working Dimmi
 | `manage-devices` (project root) | Interactive CLI to add a discovered device to config.json, and to rename/toggle/remove one already configured. No dbus/gi -- runs fine off the Cerbo for review; only the final service-restart step needs the real device. |
 | `ext/velib_python` (vendored, not a submodule -- see "Vendored, Not a Submodule" below) | Victron's own `VeDbusService` reference implementation (MIT), pinned at commit `17bbcd4c632d3eda484cde611dc78bf8c2ba469f`. `tank_service.py`/`switch_service.py`/`publisher.py` import `vedbus` directly from it. **Not this project's code**, but tracked directly in git (not a submodule) so it survives a GitHub-archive-based update intact. |
 
-**Testability note:** every file above except the three requiring dbus/gi (`tank_service.py`, `switch_service.py`, `publisher.py`) has unit tests that run in this repo. The dbus/gi-dependent files are syntax-checked with `py_compile` only, and can only be functionally verified on the actual Cerbo.
+**Testability note:** every file above except the four requiring dbus/gi (`tank_service.py`, `switch_service.py`, `battery_voltage_service.py`, `publisher.py`) has unit tests that run in this repo. The dbus/gi-dependent files are syntax-checked with `py_compile` only, and can only be functionally verified on the actual Cerbo.
 
 ---
 
@@ -472,7 +483,7 @@ Not documented by any of the three community source repos -- decoded directly fr
 }
 ```
 
-Valid `device_class` values (`dbus_bridge/config_manager.py::VALID_DEVICE_CLASSES`): `tank`, `relay_light`, `dimmable_light`, `relay_pump`, `relay_water_heater`. (`motor_status` removed — see "Motor Status Support — Removed" under D-Bus Service Layer below.) `device_class` is operator-confirmed at config time, never auto-inferred — `routing.route_device_id()` cross-checks it live against the observed DeviceType before creating a service, and `command_gate.py`'s command safety gate does the same before sending anything.
+Valid `device_class` values (`dbus_bridge/config_manager.py::VALID_DEVICE_CLASSES`): `tank`, `relay_light`, `dimmable_light`, `relay_pump`, `relay_water_heater`, `battery_voltage`. (`motor_status` removed — see "Motor Status Support — Removed" under D-Bus Service Layer below.) `device_class` is operator-confirmed at config time, never auto-inferred — `routing.route_device_id()` cross-checks it live against the observed DeviceType before creating a service, and `command_gate.py`'s command safety gate does the same before sending anything.
 
 `ConfigManager.add_device()` defaults `expose` and `commands_enabled` both to `False` — adding a device to config must never implicitly turn it on for display or for commands. `commands_enabled` is a second, independent flag: a device can be exposed (visible, read-only) without ever being commandable. `discovered_devices.json` (gitignored, next to `config.json`) records stable keys seen on the bus but absent from config, purely for the user's review; being in that file never causes exposure.
 
@@ -494,10 +505,11 @@ Device instances use a smaller, per-kind range and DO need to be collision-free 
 |------|----------------------|-----------------|
 | tank | `com.victronenergy.tank.onecontrol_<id>` | 20-119 |
 | switch | `com.victronenergy.switch.onecontrol_<id>` | 700-799 |
+| battery | `com.victronenergy.battery.onecontrol_<id>` | 900-999 |
 
 `motor_status` (`com.victronenergy.genericstatus.onecontrol_motor_<id>`, instance range 800-899) removed — see "Motor Status Support — Removed" below. Instance range 800-899 and ProductId `0xA002` are retired, not reused by anything else, in case motor status support comes back and a config still has a persisted `device_instance` in that range.
 
-Self-assigned `ProductId` values (not official Victron IDs, since this isn't an official Victron product): tank=`0xA000`, switch=`0xA001`.
+Self-assigned `ProductId` values (not official Victron IDs, since this isn't an official Victron product): tank=`0xA000`, switch=`0xA001`, battery=`0xA003`.
 
 ### Tank Paths (`com.victronenergy.tank`)
 

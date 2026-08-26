@@ -18,6 +18,11 @@ class StableKeyTests(unittest.TestCase):
         text = key.to_config_string()
         self.assertEqual(StableKey.from_config_string(text), key)
 
+    def test_device_type_key_round_trips_through_config_string(self):
+        key = StableKey("device_type", 39, 0)
+        text = key.to_config_string()
+        self.assertEqual(StableKey.from_config_string(text), key)
+
     def test_rejects_invalid_kind(self):
         with self.assertRaises(ValueError):
             StableKey("bogus", 1, 1)

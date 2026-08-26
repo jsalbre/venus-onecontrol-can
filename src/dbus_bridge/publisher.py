@@ -47,9 +47,16 @@ from can_link.command_sequencer import CommandAttempt
 from can_link.device_id import decode_device_id, stable_key
 from can_link.device_status import UnknownDeviceTypeError, decode_status
 from can_link.frame import CanFrame, ExtendedId, StandardId, decode_id, encode_extended_id
-from can_link.pid_client import PID_READ_REQUEST_CODE, PID_SIMULATE_ON_OFF_STYLE_LIGHT, build_pid_read_request, parse_pid_reply
+from can_link.pid_client import (
+    PID_BATTERY_VOLTAGE,
+    PID_READ_REQUEST_CODE,
+    PID_SIMULATE_ON_OFF_STYLE_LIGHT,
+    build_pid_read_request,
+    parse_pid_reply,
+)
 from can_link.types import MessageType, StableKey, function_name_label
 from dbus_bridge.backoff import RestartBackoff
+from dbus_bridge.battery_voltage_service import BatteryVoltageService
 from dbus_bridge.command_gate import CommandGateResult, evaluate_command_request
 from dbus_bridge.command_mapping import command_frame_for_switch_write
 from dbus_bridge.config_manager import ConfigManager, DiscoveryLog
@@ -121,6 +128,7 @@ class Publisher:
         self._pending_commands: dict[StableKey, CommandAttempt] = {}
         self._queued_commands: dict[StableKey, tuple[str, bool, int | None]] = {}
         self._pending_dimmable_reads: dict[StableKey, _PendingDimmableRead] = {}
+        self._pending_voltage_reads: dict[StableKey, int] = {}
 
         self.bus: SocketCanBus | None = None
         self._can_interface: str | None = None
@@ -290,7 +298,10 @@ class Publisher:
             return
 
         if decoded.message_data == PID_READ_REQUEST_CODE:
-            self._handle_dimmable_pid_read_response(key, decoded.source_address, data, now)
+            if key in self._pending_dimmable_reads:
+                self._handle_dimmable_pid_read_response(key, decoded.source_address, data, now)
+            elif key in self._pending_voltage_reads:
+                self._handle_voltage_pid_read_response(key, decoded.source_address, data, now)
             return
 
         attempt = self._pending_commands.get(key)
@@ -334,6 +345,53 @@ class Publisher:
                 "%s: PID 161 read timed out, creating service with default (real dimmer)", key.to_config_string()
             )
             self._create_service(key, pending.device_class, pending.kind, now, dimming_capable=True)
+        return True
+
+    def _handle_voltage_pid_read_response(self, key: StableKey, source_address: int, data: bytes, now: float) -> None:
+        target = self._pending_voltage_reads.get(key)
+        if target is None or target != source_address:
+            return
+        del self._pending_voltage_reads[key]
+
+        try:
+            reply = parse_pid_reply(data)
+            if reply.pid != PID_BATTERY_VOLTAGE:
+                return
+        except ValueError:
+            return
+
+        entry = self.services.get(key)
+        if entry is None:
+            return
+        voltage = reply.raw_value / 65536
+        entry.service.update(voltage)
+
+    def _poll_battery_voltage_devices(self) -> bool:
+        """Periodic recurring PID re-read for every battery_voltage device,
+        unlike the one-shot PID 161 read (which gates service creation).
+        Non-safety-critical telemetry -- a lost/late response just
+        self-heals on the next cycle, same tolerance as the PID 161 read's
+        own "stale target_address just means a wasted read" precedent, so
+        no timeout sweep is needed here."""
+        if self._bridge_address is None:
+            return True
+        now = time.time()
+        for key, entry in self.services.items():
+            if entry.kind != "battery":
+                continue
+            address = self.address_table.resolve(key, now)
+            if address is None:
+                continue
+            self._pending_voltage_reads[key] = address
+            can_id = encode_extended_id(
+                source_address=self._bridge_address,
+                target_address=address,
+                message_data=PID_READ_REQUEST_CODE,
+                message_type=MessageType.REQUEST,
+            )
+            self._send_frame(CanFrame(can_id=can_id, is_extended=True, data=build_pid_read_request(
+                PID_BATTERY_VOLTAGE
+            )))
         return True
 
     def _handle_device_id(self, source_address: int, payload: bytes, now: float) -> None:
@@ -434,6 +492,11 @@ class Publisher:
                     initial_show_ui_control=self.config_manager.get_show_ui_control(key),
                     on_show_ui_control_change=self._save_show_ui_control,
                     dimming_capable=dimming_capable,
+                )
+            elif kind == "battery":
+                service = BatteryVoltageService(
+                    key, friendly_name, device_instance, __version__,
+                    dbusconn=dbusconn, on_name_change=self._save_friendly_name,
                 )
             else:
                 _LOGGER.error("Unhandled service kind %r for %s", kind, key.to_config_string())
@@ -668,6 +731,12 @@ class Publisher:
                 self._add_glib_source(GLib.timeout_add(COMMAND_TIMEOUT_SWEEP_MS, self._check_pending_command_timeouts))
                 self._add_glib_source(
                     GLib.timeout_add(COMMAND_TIMEOUT_SWEEP_MS, self._check_pending_dimmable_read_timeouts)
+                )
+                self._add_glib_source(
+                    GLib.timeout_add(
+                        int(self.config.get("pid_poll_interval_sec", 30) * 1000),
+                        self._poll_battery_voltage_devices,
+                    )
                 )
                 self._start_address_claim()
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from can_link.types import DeviceType, StableKey
+from can_link.types import DeviceType, StableKey, SYSTEM_SINGLETON_DEVICE_TYPES
 
 DEVICE_ID_PAYLOAD_LENGTH = 8
 
@@ -62,7 +62,12 @@ def decode_device_id(payload: bytes) -> DeviceIdentity:
 def stable_key(identity: DeviceIdentity) -> StableKey:
     """The persistent identifier for this device, independent of its
     volatile CAN SourceAddress. Falls back to (PRODUCT_ID, instance) when
-    FUNCTION_NAME is unpopulated (0)."""
+    FUNCTION_NAME is unpopulated (0) -- except for a narrow allowlist of
+    singleton system devices (SYSTEM_SINGLETON_DEVICE_TYPES), which key by
+    (DEVICE_TYPE, device_instance) instead, since their PRODUCT_ID fallback
+    collides with the generic, ambiguous unconfigured device pool."""
     if identity.function_name != 0:
         return StableKey("function_name", identity.function_name, identity.function_instance)
+    if identity.device_type in SYSTEM_SINGLETON_DEVICE_TYPES:
+        return StableKey("device_type", identity.device_type_raw, identity.device_instance)
     return StableKey("product_id", identity.product_id, identity.product_instance)

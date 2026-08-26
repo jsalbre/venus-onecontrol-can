@@ -145,6 +145,14 @@ COMMANDABLE_DEVICE_TYPES = frozenset(
     }
 )
 
+# DEVICE_TYPEs that are one-per-module system devices, not per-position
+# hardware -- these get a stable key derived from (DEVICE_TYPE,
+# device_instance) instead of falling back to the generic, ambiguous
+# (PRODUCT_ID, instance) shared by every unconfigured relay/tank position on
+# the module (see stable_key() in device_id.py and ARCHITECTURE.md's
+# "device_instance" section).
+SYSTEM_SINGLETON_DEVICE_TYPES = frozenset({DeviceType.CHASSIS_INFO})
+
 # The real FUNCTION_NAME -> display-name table, extracted from the
 # LippertConnect Android app's decompiled FUNCTION_NAME class
 # (assembly_0080, static constructor). Names are NEVER transmitted over the
@@ -626,6 +634,10 @@ class StableKey:
     kind="function_name": primary=FUNCTION_NAME, instance=function_instance nibble.
     kind="product_id": primary=PRODUCT_ID, instance=product instance (fallback,
         used only when FUNCTION_NAME is 0/unset on a device).
+    kind="device_type": primary=DEVICE_TYPE raw byte, instance=device_instance
+        nibble -- used only for a narrow allowlist of singleton system devices
+        (see SYSTEM_SINGLETON_DEVICE_TYPES) whose (PRODUCT_ID, instance)
+        fallback would otherwise collide with the ambiguous unconfigured pool.
     """
 
     kind: str
@@ -633,17 +645,23 @@ class StableKey:
     instance: int
 
     def __post_init__(self) -> None:
-        if self.kind not in ("function_name", "product_id"):
+        if self.kind not in ("function_name", "product_id", "device_type"):
             raise ValueError(f"invalid StableKey kind: {self.kind!r}")
 
     def to_config_string(self) -> str:
-        return f"{self.kind}={self.primary},{'function_instance' if self.kind == 'function_name' else 'instance'}={self.instance}"
+        if self.kind == "function_name":
+            return f"function_name={self.primary},function_instance={self.instance}"
+        if self.kind == "device_type":
+            return f"device_type={self.primary},device_instance={self.instance}"
+        return f"product_id={self.primary},instance={self.instance}"
 
     @classmethod
     def from_config_string(cls, text: str) -> "StableKey":
         parts = dict(item.split("=", 1) for item in text.split(","))
         if "function_name" in parts:
             return cls("function_name", int(parts["function_name"]), int(parts["function_instance"]))
+        if "device_type" in parts:
+            return cls("device_type", int(parts["device_type"]), int(parts["device_instance"]))
         if "product_id" in parts:
             return cls("product_id", int(parts["product_id"]), int(parts["instance"]))
         raise ValueError(f"unrecognized stable key format: {text!r}")

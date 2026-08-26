@@ -52,6 +52,23 @@ class StableKeyDerivationTests(unittest.TestCase):
         identity = decode_device_id(payload)
         self.assertEqual(stable_key(identity), StableKey("product_id", 0x1234, 5))
 
+    def test_chassis_info_keys_by_device_type_not_product_id_fallback(self):
+        # DEVICE_TYPE=CHASSIS_INFO(39), FUNCTION_NAME unset, device_instance=0
+        # -- must NOT fall back to (PRODUCT_ID, instance), since that's the
+        # same ambiguous fallback shared by the unconfigured relay/tank pool.
+        payload = bytes([0x00, 0xE8, 0x2A, 39, 0x00, 0x00, 0x00, 0x00])
+        identity = decode_device_id(payload)
+        self.assertEqual(stable_key(identity), StableKey("device_type", 39, 0))
+
+    def test_other_function_name_unset_device_types_still_fall_back(self):
+        # A non-singleton DEVICE_TYPE with FUNCTION_NAME unset (e.g. an
+        # unconfigured relay output) must still use the product_id fallback
+        # -- confirms the device_type branch is narrowly scoped, not a
+        # blanket change to every FUNCTION_NAME=0 device.
+        payload = bytes([0x00, 0xE8, 0x2A, 30, 0x00, 0x00, 0x30, 0x00])
+        identity = decode_device_id(payload)
+        self.assertEqual(stable_key(identity), StableKey("product_id", 0xE8, 0x2A))
+
 
 if __name__ == "__main__":
     unittest.main()
