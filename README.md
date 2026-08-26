@@ -1,6 +1,6 @@
 # venus-onecontrol-can
 
-**Version:** 1.1.1 | **Updated:** 2026-08-26
+**Version:** 1.1.2 | **Updated:** 2026-08-26
 
 ---
 

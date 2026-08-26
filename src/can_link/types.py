@@ -36,7 +36,9 @@ class MessageType(IntEnum):
 
 class DeviceType(IntEnum):
     """DEVICE_TYPE enum from DEVICE_ID broadcasts, per decompiled Lippert
-    firmware (D-Jeffrey/UnityX-canbus IDS-coding.md)."""
+    firmware. Values 0-38 per D-Jeffrey/UnityX-canbus's IDS-coding.md;
+    39-62 per manos/OneControl-RV-C-Protocol's decompiled DEVICE_TYPE
+    class (D-Jeffrey's own listing stops at 38)."""
 
     UNKNOWN = 0
     GENERIC = 1
@@ -79,7 +81,28 @@ class DeviceType(IntEnum):
     RAIN_SENSOR = 38
     CHASSIS_INFO = 39
     LEVELER_TYPE_4 = 40
+    WIFI_GATEWAY = 41
+    TPMS_TIRE_LINC = 42
+    MONITOR_PANEL = 43
+    ACCESSORY_GATEWAY = 44
+    CAMERA = 45
+    JAYCO_AUS_TBB_GW = 46
     AWNING_SENSOR = 47
+    BRAKE_CONTROLLER = 48
+    BATTERY_MONITOR = 49
+    REFLASH_BOOTLOADER = 50
+    DOOR_LOCK = 51
+    AUDIBLE_ALERT = 52
+    ECHO_BRAKE_CONTROL = 53
+    OCTP_WITH_RVLINK = 54
+    ANGLE_SENSOR = 55
+    LEVELER_TYPE_5 = 56
+    BASECAMP_TOUCHPAD = 57
+    ELECTRIC_MECHANICAL_BRAKE_CONTROLLER = 58
+    HEADLESS_STEREO = 59
+    BUTTON_FLIC = 60
+    RGBW_LIGHT = 61
+    HIL_TEST_BENCH = 62
 
 
 # DEVICE_TYPEs that share the RELAY_TYPE_2_STATUS_PARAMS 6-byte DEVICE_STATUS
