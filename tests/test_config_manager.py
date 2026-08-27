@@ -52,7 +52,7 @@ class ConfigManagerTests(unittest.TestCase):
 
     def test_add_device_accepts_battery_voltage(self):
         battery_key = StableKey("device_type", 39, 0)
-        self.manager.add_device(battery_key, "Battery Voltage", "battery_voltage")
+        self.manager.add_device(battery_key, "OneControl Battery Voltage", "battery_voltage")
         self.assertEqual(self.manager.get_device_class(battery_key), "battery_voltage")
 
     def test_add_device_is_idempotent(self):

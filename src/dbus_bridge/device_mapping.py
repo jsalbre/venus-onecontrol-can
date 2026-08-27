@@ -256,7 +256,7 @@ def build_addable_list(discovered: dict, already_configured: set) -> list[Addabl
             continue
 
         if key.kind == "device_type":
-            name = "Battery Voltage"
+            name = "OneControl Battery Voltage"
         else:
             name = function_name_label(key.primary)
             if key.instance:

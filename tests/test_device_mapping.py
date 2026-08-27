@@ -365,7 +365,7 @@ class BuildAddableListTests(unittest.TestCase):
         result = build_addable_list(discovered, already_configured=set())
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].device_class, "battery_voltage")
-        self.assertEqual(result[0].suggested_friendly_name, "Battery Voltage")
+        self.assertEqual(result[0].suggested_friendly_name, "OneControl Battery Voltage")
 
     def test_real_discovery_log_from_actual_hardware(self):
         # Verbatim discovered_devices.json from the 2026-08-20 deployment.
