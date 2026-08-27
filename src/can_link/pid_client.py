@@ -67,7 +67,6 @@ RESPONSE_CODE_NAMES: dict[int, str] = {
     22: "IN_PROGRESS",
 }
 
-PID_BATTERY_VOLTAGE = 43
 PID_AUX_BATTERY_VOLTAGE = 144
 
 # Confirmed via decompiled LippertConnect source (2026-08-21, see
